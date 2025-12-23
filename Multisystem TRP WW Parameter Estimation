@@ -1,0 +1,250 @@
+Multisystem Parameter estimation
+
+"This MATLAB toolkit performs advanced reliability analysis for repairable systems using a Trend-Renewal Process (TRP) model. It fits observed failure times from multiple systems to a generalized intensity function—encompassing both Power Law (NHPP) and Renewal Process behaviors—using Maximum Likelihood Estimation (MLE).
+
+function TRP_Analysis()
+    % TRP_ANALYSIS  Parameter Estimation and Analysis for Repairable Systems
+    % Fits a Trend-Renewal Process (Generalized Polya) to failure data using MLE.
+    
+    clc;
+    clear;
+    close all;
+
+    %% --- 1. Input Observed Failure Times ---
+    % Cell array containing cumulative failure times (Arrival Times).
+    % Data must be row vectors in increasing order.
+    failureTimesCell = {
+        [6425, 7222, 7309, 9189, 14760];
+        [4064, 8815, 13300, 15207];
+        [3211, 13885];
+        [7118, 15522, 15871];
+        [5809, 12298, 14992];
+        [2796, 7127, 7360, 7774, 8001, 11818, 15689];
+        [8278, 14946, 15822];
+        [1271, 6224, 11860];
+        [995, 4253, 8467, 10044, 10923, 14490, 15663];
+    };
+
+    if isempty(failureTimesCell)
+        error('Input data failureTimesCell is empty.');
+    end
+
+    %% --- 2. Maximum Likelihood Estimation (MLE) ---
+    fprintf('Starting Maximum Likelihood Estimation...\n');
+
+    % Initial Guesses [a (scale), b (trend), c (renewal)]
+    initial_params = [0.001, 1.0, 0.5];
+    
+    % Parameter Bounds
+    lb = [1e-6, 0.1, 0.1];
+    ub = [10, 10, 10];
+
+    % Optimization Settings
+    options = optimoptions('fmincon', ...
+        'Display', 'iter', ...
+        'Algorithm', 'interior-point', ...
+        'FiniteDifferenceType', 'central', ...
+        'HessianApproximation', 'bfgs', ...
+        'StepTolerance', 1e-10);
+
+    % Objective Function
+    objFun = @(params) negLogLikelihoodMulti(params, failureTimesCell);
+
+    % Run Optimization
+    [estimated_params, ~, ~, ~, ~, ~, hessian] = ...
+        fmincon(objFun, initial_params, [], [], [], [], lb, ub, [], options);
+
+    a_est = estimated_params(1);
+    b_est = estimated_params(2);
+    c_est = estimated_params(3);
+
+    %% --- 3. Confidence Intervals ---
+    % Compute Standard Errors from Inverse Hessian
+    try
+        covariance = inv(hessian);
+        std_errors = sqrt(diag(covariance))';
+    catch
+        warning('Hessian is singular. CIs may be unreliable.');
+        std_errors = [NaN, NaN, NaN];
+    end
+
+    % Z-scores
+    z_scores = [1.645, 1.960, 2.576]; % 90%, 95%, 99%
+    levels_str = {'90%', '95%', '99%'};
+    
+    % Compute Intervals (Lower bound clipped at 0)
+    CI_lower = zeros(3,3); CI_upper = zeros(3,3);
+    for i = 1:3
+        CI_lower(i,:) = max(estimated_params - z_scores(i)*std_errors, 0);
+        CI_upper(i,:) = estimated_params + z_scores(i)*std_errors;
+    end
+
+    % Display Results
+    ParamNames = {'a (Scale)'; 'b (Trend)'; 'c (Renewal)'};
+    T = table(ParamNames, CI_lower(3,:)', CI_lower(2,:)', CI_lower(1,:)', ...
+              estimated_params', ...
+              CI_upper(1,:)', CI_upper(2,:)', CI_upper(3,:)', ...
+              'VariableNames', {'Parameter', 'L_99', 'L_95', 'L_90', 'Estimate', 'U_90', 'U_95', 'U_99'});
+    
+    fprintf('\n------------------------------------------------------------\n');
+    fprintf('PARAMETER ESTIMATION RESULTS\n');
+    fprintf('------------------------------------------------------------\n');
+    disp(T);
+
+    %% --- 4. Visualizations ---
+    
+    % 4.1 Parameter Confidence Intervals
+    figure('Name', 'Parameter CIs', 'Color', 'w');
+    for i = 1:3
+        subplot(1,3,i);
+        err_low = estimated_params(i) - CI_lower(:,i)';
+        err_high = CI_upper(:,i)' - estimated_params(i);
+        errorbar(1:3, repmat(estimated_params(i),1,3), err_low, err_high, 'o-', 'LineWidth', 1.5);
+        set(gca, 'XTick', 1:3, 'XTickLabel', levels_str);
+        title(ParamNames{i}); grid on; xlim([0.5 3.5]);
+    end
+
+    % 4.2 Failure Events Timeline
+    figure('Name', 'Failure Timeline', 'Color', 'w');
+    hold on;
+    for i = 1:length(failureTimesCell)
+        ft = failureTimesCell{i};
+        if ~isempty(ft)
+            plot(ft, i*ones(size(ft)), 'x', 'LineWidth', 1.5);
+        end
+    end
+    xlabel('Time (t)'); ylabel('System Index'); title('Observed Failure Events');
+    grid on; ylim([0 length(failureTimesCell)+1]);
+
+    % 4.3 Scaled Total Time on Test (Trend Plot)
+    figure('Name', 'Scaled TTT', 'Color', 'w');
+    hold on;
+    colors = lines(length(failureTimesCell));
+    for i = 1:length(failureTimesCell)
+        ft = sort(failureTimesCell{i});
+        n = length(ft);
+        if n > 1
+            % Scaled TTT: Normalized Rank vs Normalized Arrival Time
+            plot((1:n)/n, ft/ft(end), '-o', 'Color', colors(i,:), 'MarkerSize', 4);
+        end
+    end
+    plot([0 1], [0 1], 'k--', 'LineWidth', 2, 'DisplayName', 'HPP (No Trend)');
+    xlabel('Normalized Rank (i/n)'); ylabel('Normalized Time (t_i / T_{end})');
+    title('Scaled Total Time on Test (Trend Analysis)');
+    grid on;
+
+    % 4.4 Intensity Function Trace
+    figure('Name', 'Intensity Function', 'Color', 'w');
+    hold on;
+    maxTime = max(cellfun(@max, failureTimesCell));
+    t_vals = linspace(1, maxTime, 1000);
+    
+    % Gamma Function
+    gamma = @(t, tp) (a_est^c_est)*b_est*c_est .* t.^(b_est-1) .* (t.^b_est - tp.^b_est).^(c_est-1);
+    
+    % Plot System 1 as Example
+    sysIdx = 1;
+    times = failureTimesCell{sysIdx};
+    t_prev = 0;
+    for i = 1:length(times)
+        idx = t_vals > t_prev & t_vals <= times(i);
+        if any(idx)
+            plot(t_vals(idx), gamma(t_vals(idx), t_prev), 'b-', 'LineWidth', 1.5);
+        end
+        xline(times(i), ':', 'Color', [0.7 0.7 0.7], 'HandleVisibility', 'off');
+        t_prev = times(i);
+    end
+    idx = t_vals > t_prev;
+    plot(t_vals(idx), gamma(t_vals(idx), t_prev), 'b--', 'LineWidth', 1.5);
+    xlabel('Time'); ylabel('Intensity \gamma(t)');
+    title(['Estimated Intensity Trace (System ' num2str(sysIdx) ')']);
+    grid on;
+
+    %% --- 5. Anderson-Darling Goodness-of-Fit ---
+    performADTest(failureTimesCell, a_est, b_est, c_est);
+
+end
+
+%% --- Helper Functions ---
+
+function negLL = negLogLikelihoodMulti(params, failureTimesCell)
+    % Unpack
+    a = params(1); b = params(2); c = params(3);
+    if a <= 0 || b <= 0 || c <= 0, negLL = Inf; return; end
+    
+    K = (a^c) * b * c;
+    lnL_total = 0;
+    
+    for s = 1:length(failureTimesCell)
+        times = failureTimesCell{s}(:); % Column vector
+        if isempty(times), continue; end
+        
+        t_curr = times;
+        t_prev = [0; times(1:end-1)];
+        
+        % Vectorized Calculation
+        term_diff = t_curr.^b - t_prev.^b;
+        term_diff(term_diff <= 0) = eps;
+        
+        % 1. Log Intensity
+        log_gamma = log(K) + (b-1)*log(t_curr) + (c-1)*log(term_diff);
+        
+        % 2. Cumulative Intensity (Analytical Integral)
+        % Integral_{t_prev}^{t} gamma(u) du = a^c * (t^b - t_prev^b)^c
+        Lambda = (a^c) * (term_diff.^c);
+        
+        lnL_total = lnL_total + sum(log_gamma - Lambda);
+    end
+    negLL = -lnL_total;
+end
+
+function performADTest(failureTimesCell, a, b, c)
+    % Calculate Transformed Residuals
+    Z_all = [];
+    for s = 1:length(failureTimesCell)
+        times = failureTimesCell{s};
+        t_prev = 0;
+        for i = 1:length(times)
+            t_curr = times(i);
+            % Transform based on cumulative hazard
+            Z_i = (a^c) * (t_curr^b - t_prev^b)^c;
+            Z_all(end+1) = Z_i; %#ok<AGROW>
+            t_prev = t_curr;
+        end
+    end
+    
+    Z_sorted = sort(Z_all(:));
+    n = length(Z_sorted);
+    beta_hat = mean(Z_sorted); % Estimated mean (should be ~1)
+    
+    % AD Statistic
+    F = 1 - exp(-Z_sorted / beta_hat);
+    F = max(min(F, 1-eps), eps); % Clip
+    
+    S = sum((2*(1:n)' - 1) .* (log(F) + log(1 - flipud(F))));
+    A2 = -n - (1/n)*S;
+    
+    % Stephens (1974) Adjustment for Exponential (Case 2: Scale estimated)
+    A2_adj = A2 * (1 + 0.6/n);
+    
+    % Critical Values
+    cv = [1.078, 1.340, 1.957]; % 10%, 5%, 1%
+    
+    fprintf('\n--- Anderson-Darling Goodness-of-Fit ---\n');
+    fprintf('N (Residuals):      %d\n', n);
+    fprintf('Mean of Residuals:  %.4f (Expected ~1.0)\n', beta_hat);
+    fprintf('AD Statistic (Adj): %.4f\n', A2_adj);
+    
+    if A2_adj > cv(2)
+        res = 'Reject H0 (Poor Fit)';
+    else
+        res = 'Fail to Reject H0 (Good Fit)';
+    end
+    fprintf('Result (at 5%%):     %s\n', res);
+    
+    % Plot
+    figure('Name', 'AD Test Result', 'Color', 'w'); hold on;
+    yline(cv(2), '--r', '5% Critical Value');
+    bar(1, A2_adj, 0.5);
+    ylabel('AD Statistic'); xlim([0.5 1.5]); xticks([]);
+    title('Goodness of Fit Test');
