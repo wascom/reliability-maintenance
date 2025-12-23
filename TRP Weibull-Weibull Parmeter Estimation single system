@@ -1,0 +1,160 @@
+Parameter Estimation for Weibull-Weibull Trend Renewal Process (WW-TRP)Description:This MATLAB toolkit performs Maximum Likelihood Estimation (MLE) to calibrate a Weibull-Weibull Trend Renewal Process (WW-TRP). This model captures the behavior of repairable systems by combining a global aging trend (Power Law) with local renewal effects (Weibull inter-arrival times). The intensity function is defined as:$$ \lambda(t) = a^c \cdot b \cdot c \cdot t^{b-1} (t^b - t_{prev}^b)^{c-1} $$Where $t$ is the cumulative time, $t_{prev}$ is the time of the previous failure, $b$ is the trend parameter, and $c$ is the renewal shape parameter.
+
+function estimate_ww_trp()
+% ESTIMATE_WW_TRP  Estimates parameters for a Weibull-Weibull Trend Renewal Process.
+%
+% This script performs Maximum Likelihood Estimation (MLE) on observed
+% failure times assuming a Trend Renewal Process (TRP).
+%
+% Model Definition:
+%   Intensity: lambda(t) = (a^c * b * c) * t^(b-1) * (t^b - t_prev^b)^(c-1)
+%   Cumulative Hazard: Lambda(t_prev, t) = [ a * (t^b - t_prev^b) ]^c
+
+    clc;
+    close all;
+
+    % --- 1. Input Observed Failure Times ---
+    % t_i: Cumulative failure times (must be strictly increasing)
+    t_i = [995, 4253, 8467, 10044, 10923, 14490, 15663];
+
+    if any(diff(t_i) <= 0)
+        error('Failure times must be strictly increasing.');
+    end
+
+    % --- 2. Optimization Setup ---
+    % Parameters: [a (Scale), b (Trend), c (Renewal)]
+    initial_params = [0.001, 1.0, 1.0]; 
+    
+    % Lower/Upper bounds (a is essentially unbounded but >0)
+    lb = [1e-9, 0.1, 0.1]; 
+    ub = [1.0,  10.0, 10.0]; 
+
+    % Options: Interior-point is robust for bound-constrained problems
+    options = optimoptions('fmincon', ...
+        'Display', 'iter', ...
+        'Algorithm', 'interior-point', ...
+        'StepTolerance', 1e-10);
+
+    % Objective Function Wrapper
+    objFun = @(params) negLogLikelihood_Analytical(params, t_i);
+
+    % --- 3. Run Optimization ---
+    fprintf('Starting Maximum Likelihood Estimation...\n');
+    [est_params, fval] = fmincon(objFun, initial_params, [], [], [], [], lb, ub, [], options);
+
+    a_est = est_params(1);
+    b_est = est_params(2);
+    c_est = est_params(3);
+
+    % --- 4. Display Results ---
+    fprintf('\nEstimated Parameters:\n');
+    fprintf('  a (Scale)         = %.6e\n', a_est);
+    fprintf('  b (Trend Shape)   = %.6f\n', b_est);
+    fprintf('  c (Renewal Shape) = %.6f\n', c_est);
+    fprintf('  Neg Log-Likelihood= %.4f\n', fval);
+
+    % --- 5. Visualization ---
+    plot_results(t_i, a_est, b_est, c_est);
+end
+
+% -------------------------------------------------------------------------
+% LOCAL FUNCTIONS
+% -------------------------------------------------------------------------
+
+function negLL = negLogLikelihood_Analytical(params, t_i)
+% Calculates Negative Log-Likelihood using the closed-form solution.
+% This avoids the slow and error-prone integral() function.
+    a = params(1);
+    b = params(2);
+    c = params(3);
+
+    if a <= 0 || b <= 0 || c <= 0
+        negLL = Inf; return;
+    end
+
+    n = length(t_i);
+    t_prev = [0, t_i(1:end-1)];
+    t_curr = t_i;
+
+    K = (a^c) * b * c;
+    
+    % Time transformation
+    % We use max(..., eps) to prevent log(0) errors during optimization steps
+    diff_term = max((t_curr.^b - t_prev.^b), eps); 
+    
+    % 1. Sum of log intensities
+    sum_log_lambda = n * log(K) + ...
+                     (b - 1) * sum(log(t_curr)) + ...
+                     (c - 1) * sum(log(diff_term));
+
+    % 2. Sum of cumulative hazards (Analytical Integral)
+    % Integral of lambda(t) dt = [ a(t^b - t_prev^b) ]^c
+    sum_Lambda = sum( (a * diff_term).^c );
+
+    % Negative Log Likelihood
+    negLL = -(sum_log_lambda - sum_Lambda);
+end
+
+function plot_results(t_i, a, b, c)
+% Plots the Intensity Function and Failure Events
+% Uses a single vector with NaNs to ensure clean legends and correct plotting.
+
+    % Generate curve data
+    t_plot = [];
+    gamma_plot = [];
+    t_prev = 0;
+    
+    for i = 1:length(t_i)
+        t_curr = t_i(i);
+        
+        % Create time segment (offset start slightly to avoid singularities)
+        t_seg = linspace(t_prev + 1e-4, t_curr, 100);
+        
+        % Calculate Intensity
+        K = (a^c) * b * c;
+        gamma_seg = K .* t_seg.^(b-1) .* (t_seg.^b - t_prev^b).^(c-1);
+        
+        % Append to master vectors, ending with NaN to break the line
+        t_plot = [t_plot, t_seg, NaN];         %#ok<AGROW>
+        gamma_plot = [gamma_plot, gamma_seg, NaN]; %#ok<AGROW>
+        
+        t_prev = t_curr;
+    end
+
+    figure('Color', 'w');
+    hold on;
+    
+    % 1. Plot Intensity Curve (One single object for the legend)
+    plot(t_plot, gamma_plot, 'b-', 'LineWidth', 1.5, ...
+        'DisplayName', 'Estimated Intensity \lambda(t)');
+    
+    % 2. Plot Failure Events (Vertical Lines)
+    % xline draws across the whole plot, fixing the "wrong location" issue
+    for k = 1:length(t_i)
+        if k == 1
+            xline(t_i(k), '--', 'Color', [0.5 0.5 0.5], ...
+                'DisplayName', 'Failure Event');
+        else
+            % Hide subsequent lines from legend to fix "keys have errors"
+            xline(t_i(k), '--', 'Color', [0.5 0.5 0.5], 'HandleVisibility', 'off');
+        end
+    end
+    
+    % 3. Optional: Add a "Rug Plot" on the x-axis
+    scatter(t_i, zeros(size(t_i)), 50, 'r', 'filled', 'HandleVisibility', 'off');
+
+    % Formatting
+    title('WW-TRP Intensity Function Estimation');
+    subtitle(sprintf('Parameters: a=%.2e, b=%.2f, c=%.2f', a, b, c));
+    xlabel('Cumulative Time (t)');
+    ylabel('Intensity \lambda(t)');
+    legend('show', 'Location', 'best');
+    grid on;
+    
+    % Adjust Y-limits to fit data nicely (handling potential singularities)
+    max_finite = max(gamma_plot(~isinf(gamma_plot)));
+    if ~isempty(max_finite)
+        ylim([0, max_finite * 1.2]);
+    end
+    hold off;
+end
