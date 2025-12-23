@@ -1,0 +1,470 @@
+This MATLAB simulation implements an Average-Reward Q-Learning (R-Learning) algorithm to optimize Condition-Based Maintenance (CBM) strategies for a stochastic system under strict annual budget constraints. Developed as part of a Ph.D. dissertation, the agent learns an optimal policy $\pi^*(h, \tau, s)$ that balances maximizing equipment health with adhering to a target annual spend (approx. 90%).
+
+Key Features:R-Learning Algorithm: Solves the infinite-horizon average-reward problem, enabling the agent to maximize long-term performance ($\rho$) rather than discounted future rewards.Budget Slack Tracking: Incorporates a continuous "slack" state variable to dynamically manage spending deviations, ensuring the agent meets fiscal targets over recurrent budget cycles.Sensitivity Analysis: Includes automated Monte Carlo routines to evaluate policy robustness against variations in reward weights ($w_b$) and maintenance costs.Publication-Ready Visualization: Generates twelve high-resolution figures with strict color consistency (e.g., Blue=Health, Red=Reward, Orange=Budget) designed for academic legibility.Dependencies:MATLAB Statistics and Machine Learning Toolbox (required for confidence interval calculations).
+
+%% RPT Stand Maintenance — Average-Reward Q-Learning (R-Learning)
+%
+%  DESCRIPTION:
+%  This script simulates a reinforcement learning agent optimizing maintenance 
+%  actions for a degrading system. The goal is to maximize system health while 
+%  ensuring ~90% annual budget utilization.
+%
+%  The script generates 12 publication-quality figures with strict color 
+%  consistency for use in academic dissertations.
+%
+%  COLOR LEGEND:
+%    - Health (h)      : BLUE    [0.000, 0.447, 0.741]
+%    - Reward (r)      : RED     [0.635, 0.078, 0.184]
+%    - Tau (t)         : GREEN   [0.466, 0.674, 0.188]
+%    - Budget/Spend (b): ORANGE  [0.850, 0.325, 0.098]
+%    - Slack (s)       : MAGENTA [0.750, 0.000, 0.750]
+%    - Maint Count     : CYAN    [0.301, 0.745, 0.933]
+%    - Rho Estimate    : PURPLE  [0.494, 0.184, 0.556]
+%
+%  AUTHOR: [Your Name]
+%  REPOSITORY: [Link to GitHub]
+
+clc;
+clear;
+close all;
+
+% Set seed for reproducibility
+rng(7);
+
+%% ======================= 1. CONFIGURATION ==============================
+
+% --- Simulation Parameters ---
+config.nIterations = 50;     % Number of full model runs (Monte Carlo)
+config.nYears      = 200;    % Number of training years
+config.weeksPerYear= 52;     % Time steps per year
+
+% --- Physics & Cost Parameters ---
+config.lambda1     = 0.002;  % Degradation rate
+config.betaWear    = 1.20;   % Wear exponent (non-linear degradation)
+config.gainHM      = 0.12;   % Health gain from maintenance
+config.costHM      = 0.04;   % Cost of maintenance (fraction of budget)
+
+% --- RL / Reward Parameters ---
+config.w_h         = 0.90;   % Weight for Health reward
+config.w_b         = 0.10;   % Weight for Budget reward
+config.alpha       = 0.10;   % Learning rate
+config.betaRho     = 0.01;   % Average reward update rate
+config.epsMin      = 0.005;  % Minimum exploration rate
+config.epsDecay    = 0.9995; % Exploration decay factor
+
+% --- State Space Limits ---
+config.tauMax      = 8;      % Max weeks since last maintenance
+config.sMax        = 0.20;   % Max budget slack (+/-)
+
+%% ======================= 2. BASELINE SIMULATION ========================
+fprintf('Running Baseline Simulation (N=%d)...\n', config.nIterations);
+baseRes = run_simulation(config);
+
+%% ======================= 3. PLOTTING SETUP =============================
+
+% --- Publication-Quality Figure Formatting ---
+set(groot, 'DefaultFigureUnits', 'centimeters', ...
+    'DefaultFigurePosition', [5, 5, 14, 10], ...
+    'DefaultAxesFontName', 'Times New Roman', ...
+    'DefaultTextFontName', 'Times New Roman', ...
+    'DefaultAxesFontSize', 12, ...            
+    'DefaultTextFontSize', 12, ...            
+    'DefaultLineLineWidth', 2.0, ...          
+    'DefaultLineMarkerSize', 8, ...
+    'DefaultAxesTickLabelInterpreter', 'tex', ...
+    'DefaultLegendInterpreter', 'tex', ...
+    'DefaultFigureColor', 'white');
+
+% --- Global Color Map (Strict Consistency) ---
+colors.h    = [0.000, 0.447, 0.741]; % Blue (Health)
+colors.r    = [0.635, 0.078, 0.184]; % Red (Reward)
+colors.tau  = [0.466, 0.674, 0.188]; % Green (Time since maint)
+colors.b    = [0.850, 0.325, 0.098]; % Orange (Budget)
+colors.rho  = [0.494, 0.184, 0.556]; % Purple (Rho)
+colors.m    = [0.301, 0.745, 0.933]; % Cyan (Maint Count)
+colors.s    = [0.750, 0.000, 0.750]; % Magenta (Slack)
+
+% --- Common Axis Variables ---
+xYear     = baseRes.xYear;
+xlimYears = [0, config.nYears];
+yearTicks = 0:20:config.nYears;
+years     = (1:config.nYears)';
+
+%% ======================= 4. GENERATE FIGURES ===========================
+
+% 1) Mean Learning Curve (Reward -> Red)
+figure(1);
+plot_with_ci(xYear, movmean(baseRes.all_rewLog, 52), colors.r);
+xlabel('Year'); ylabel('Reward (52w avg)'); grid on;
+title('Fig 1: Mean Learning Curve');
+xlim(xlimYears); xticks(yearTicks);
+
+% 2) Average-Reward Estimate (Rho -> Purple)
+figure(2);
+plot_with_ci(xYear, baseRes.all_rhoLog, colors.rho);
+xlabel('Year'); ylabel('\rho estimate'); grid on;
+title('Fig 2: Mean Avg-Reward Estimate');
+xlim(xlimYears); xticks(yearTicks);
+
+% 3) State Trajectories (Consistent Colors)
+figure(3);
+sgtitle('Fig 3: Mean State Trajectories');
+subplot(4,1,1); 
+plot_with_ci(xYear, baseRes.all_hLog, colors.h);
+ylabel('h'); grid on; xlim(xlimYears); xticks([]);
+
+subplot(4,1,2); 
+plot_with_ci(xYear, baseRes.all_bLog, colors.b);
+ylabel('b'); grid on; xlim(xlimYears); xticks([]);
+
+subplot(4,1,3); 
+plot_with_ci(xYear, baseRes.all_tauLog, colors.tau);
+ylabel('\tau'); grid on; xlim(xlimYears); xticks([]);
+
+subplot(4,1,4); 
+plot_with_ci(xYear, baseRes.all_rewLog, colors.r);
+ylabel('r'); xlabel('Year'); grid on; xlim(xlimYears); xticks(yearTicks);
+
+% 4) Running Averages (Multi-Axis)
+figure(4);
+% Left Axis: Health (Blue) and Reward (Red)
+yyaxis left
+hLineH = plot_with_ci(xYear, movmean(baseRes.all_hLog, 52), colors.h); 
+hold on;
+hLineR = plot_with_ci(xYear, movmean(baseRes.all_rewLog, 52), colors.r, '--');
+ylabel('Value (h, r)'); 
+set(gca, 'YColor', 'k'); % Keep left axis neutral black
+grid on;
+
+% Right Axis: Tau (Green)
+yyaxis right
+hLineTau = plot_with_ci(xYear, movmean(baseRes.all_tauLog, 52), colors.tau);
+ylabel('Time Since Maint (\tau)');
+set(gca, 'YColor', colors.tau); % Match axis text to Green data
+
+xlabel('Year'); 
+title('Mean Running Averages (N=50, 1 year window)'); 
+xlim(xlimYears); xticks(yearTicks);
+
+lgd4 = legend([hLineH, hLineR, hLineTau], ...
+    {'Mean Health (h)', 'Mean Reward (r)', 'Mean \tau'}, ...
+    'Location', 'north', 'Orientation', 'horizontal');
+set(lgd4, 'Box', 'on', 'Color', 'w', 'EdgeColor', [0.15 0.15 0.15]);
+
+% 5) Mean Budget Slack (Slack -> Magenta)
+figure(5);
+plot_with_ci(xYear, baseRes.all_sLog, colors.s, '-', 0.45);
+hold on; yline(0, 'k:'); 
+xlabel('Year'); ylabel('Budget Slack (s)'); 
+ylim([-config.sMax, config.sMax]); grid on;
+title('Fig 5: Mean Budget Slack (95% CI)');
+xlim(xlimYears); xticks(yearTicks);
+
+% 6) Rolling Maintenance (Count -> Cyan)
+figure(6);
+plot_with_ci(xYear, baseRes.all_rollingMaint52, colors.m);
+xlabel('Year'); ylabel('Maint count (52w)');
+title('Fig 6: Rolling 52-wk Maintenance');
+grid on; xlim(xlimYears); xticks(yearTicks);
+
+% 7) Histogram of Tau at Maintenance (Last 80 Years)
+figure(7);
+all_tau = cat(1, baseRes.all_tauAtMaint{:});
+if ~isempty(all_tau)
+    histogram(all_tau, 'BinEdges', -0.5:1:config.tauMax+0.5, ...
+        'FaceColor', colors.tau, 'Normalization', 'probability');
+    xlabel('\tau before maintenance'); ylabel('Probability');
+    title('Fig 7: Distribution of \tau at Maint (Last 80 Years)');
+end
+
+% 8) Annual Budget Utilization (Spend -> Orange)
+figure(8);
+hMean = plot_with_ci(years, baseRes.all_spentU_byYear, colors.b);
+hold on;
+hTarget = plot([0 config.nYears], [0.90 0.90], 'k--', 'LineWidth', 2.0);
+xlabel('Year'); ylabel('Fraction Spent');
+title('Fig 8: Annual Budget Utilization');
+ylim([0 1.1]); xlim([0 config.nYears]); xticks(yearTicks);
+lgd8 = legend([hMean, hTarget], {'Mean \pm 95% CI', 'Target (0.90)'}, 'Location', 'best');
+set(lgd8, 'Box', 'on', 'Color', 'w'); 
+
+% 9) Annual Maintenance Count (Count -> Cyan)
+figure(9);
+expectedCount = 0.90 / config.costHM; 
+hMeanCount = plot_with_ci(years, baseRes.all_maintYearCount, colors.m, '-', 0.45);
+hold on;
+hExpected = plot([years(1) years(end)], [expectedCount expectedCount], ...
+     'k--', 'LineWidth', 2.0); 
+xlabel('Year'); ylabel('Count');
+title('Fig 9: Annual Maintenance Count');
+grid on; xlim([0 config.nYears]); xticks(yearTicks);
+lgd9 = legend([hMeanCount, hExpected], ...
+       {'Mean \pm 95% CI', 'Expected (90% spend)'}, 'Location', 'best');
+set(lgd9, 'Box', 'on', 'Color', 'w'); 
+
+% 10) Lowest Annual Health (Health -> Blue)
+figure(10);
+plot_with_ci(years, baseRes.all_minHealth, colors.h);
+xlabel('Year'); ylabel('Min Health');
+title('Fig 10: Lowest Health per Year');
+grid on; xlim([0 config.nYears]); xticks(yearTicks); ylim([0 1]);
+
+%% ======================= 5. SENSITIVITY ANALYSIS =======================
+fprintf('\n--- Running Sensitivity Analysis ---\n');
+sensParams = config;
+sensParams.nIterations = 20; 
+sensParams.nYears = 100;
+
+% --- Sensitivity 1: w_b vs. Spending (Spend -> Orange) ---
+wb_values = [0.0, 0.05, 0.10, 0.20, 0.40];
+mean_spend_res = zeros(length(wb_values), 1);
+std_spend_res  = zeros(length(wb_values), 1);
+
+fprintf('1. Testing w_b values: ');
+for i = 1:length(wb_values)
+    fprintf('%.2f ', wb_values(i));
+    p = sensParams;
+    p.w_b = wb_values(i);
+    p.w_h = 1.0 - p.w_b;
+    res = run_simulation(p);
+    
+    last20 = floor(p.nYears * 0.8):p.nYears;
+    data = res.all_spentU_byYear(last20, :);
+    mean_spend_res(i) = mean(data(:));
+    std_spend_res(i)  = std(mean(data,1));
+end
+fprintf('\n');
+
+figure(11);
+errorbar(wb_values, mean_spend_res, std_spend_res, '-o', ...
+    'Color', colors.b, 'LineWidth', 2.0, ...
+    'MarkerFaceColor', colors.b, 'MarkerSize', 8);
+yline(0.90, 'k--', 'Target', 'LineWidth', 1.5);
+xlabel('Budget Reward Weight (w_b)');
+ylabel('Mean Annual Spend');
+title('Fig 11: Sensitivity - w_b vs. Spending');
+grid on;
+
+% --- Sensitivity 2: Cost vs. Health (Health -> Blue) ---
+cost_values = [0.03, 0.04, 0.05, 0.06, 0.08];
+mean_health_res = zeros(length(cost_values), 1);
+std_health_res  = zeros(length(cost_values), 1);
+
+fprintf('2. Testing costHM values: ');
+for i = 1:length(cost_values)
+    fprintf('%.2f ', cost_values(i));
+    p = sensParams;
+    p.costHM = cost_values(i);
+    res = run_simulation(p);
+    
+    T_idx_start = floor(res.T * 0.8);
+    data = res.all_hLog(T_idx_start:end, :);
+    mean_health_res(i) = mean(data(:));
+    std_health_res(i)  = std(mean(data,1));
+end
+fprintf('\nDone.\n');
+
+figure(12);
+errorbar(cost_values, mean_health_res, std_health_res, '-s', ...
+    'Color', colors.h, 'LineWidth', 2.0, ...
+    'MarkerFaceColor', colors.h, 'MarkerSize', 8);
+xlabel('Maintenance Cost (fraction of budget)');
+ylabel('Mean Health');
+title('Fig 12: Sensitivity - Cost vs. Health');
+grid on;
+
+%% ======================= HELPER FUNCTIONS ==============================
+
+function hLine = plot_with_ci(x, data, color, line_style, face_alpha)
+%PLOT_WITH_CI Plots the mean of data with a 95% Confidence Interval shaded area
+    if nargin < 4, line_style = '-'; end
+    if nargin < 5, face_alpha = 0.2; end 
+    
+    x = x(:);
+    mean_y = mean(data, 2);
+    n = size(data, 2);
+    
+    if n > 1
+        std_y = std(data, 0, 2);
+        sem_y = std_y / sqrt(n);
+        t_crit = tinv(0.975, n-1); % Requires Stats Toolbox
+        
+        fill_x = [x; flipud(x)];
+        fill_y = [mean_y - t_crit*sem_y; flipud(mean_y + t_crit*sem_y)];
+        
+        fill(fill_x, fill_y, color, 'FaceAlpha', face_alpha, ...
+            'EdgeColor', 'none', 'HandleVisibility', 'off');
+        hold on;
+    end
+    hLine = plot(x, mean_y, 'Color', color, 'LineWidth', 2.0, 'LineStyle', line_style);
+end
+
+function res = run_simulation(P)
+%RUN_SIMULATION Executes the R-Learning Loop for N Iterations
+    % Unpack parameters
+    nIterations = P.nIterations;
+    lambda1 = P.lambda1; betaWear = P.betaWear;
+    gainHM = P.gainHM; costHM = P.costHM;
+    w_h = P.w_h; w_b = P.w_b;
+    alpha = P.alpha; betaRho = P.betaRho;
+    epsMin = P.epsMin; epsDecay = P.epsDecay;
+    tauMax = P.tauMax; sMax = P.sMax;
+    nYears = P.nYears;
+    
+    weeksPerYear = 52;
+    T = nYears * weeksPerYear;
+    uStar = 0.90 / weeksPerYear; % Target weekly spend rate
+    
+    % Helpers
+    Hbins = 21; TauBins = tauMax + 1; Sbins = 41;
+    toHbin   = @(h) max(1, min(Hbins, 1 + floor(h * (Hbins-1) + 1e-12)));
+    toTaubin = @(t) max(1, min(TauBins, t + 1));
+    toSbin   = @(s) max(1, min(Sbins, 1 + floor(((s + sMax)/(2*sMax)) * (Sbins-1) + 1e-12)));
+    bound01  = @(x) min(1.0, max(0.0, x));
+    clip     = @(x, lo, hi) min(hi, max(lo, x));
+    
+    % Pre-Allocation
+    res.all_rewLog         = zeros(T, nIterations);
+    res.all_hLog           = zeros(T, nIterations);
+    res.all_bLog           = zeros(T, nIterations);
+    res.all_tauLog         = zeros(T, nIterations);
+    res.all_rhoLog         = zeros(T, nIterations);
+    res.all_sLog           = zeros(T, nIterations);
+    res.all_rollingMaint52 = zeros(T, nIterations);
+    res.all_spentU_byYear  = zeros(nYears, nIterations);
+    res.all_maintYearCount = zeros(nYears, nIterations);
+    res.all_minHealth      = zeros(nYears, nIterations);
+    res.all_tauAtMaint     = cell(nIterations, 1);
+    
+    % Main Loop
+    for iter = 1:nIterations
+        % Q-Table: H x Tau x S x Actions(Wait, Maint)
+        Q = zeros(Hbins, TauBins, Sbins, 2); 
+        rho = 0.0; 
+        
+        % Initial State
+        h = 1.0; b = 1.0; tau = 0; s = 0.0;
+        
+        % Rolling buffers
+        rollBuf = zeros(weeksPerYear, 1); bufPtr = 1; rollCount = 0;
+        yearMaintCtr = 0;
+        
+        % Local history buffers
+        hL = zeros(T,1); bL = zeros(T,1); tauL = zeros(T,1); 
+        rewL = zeros(T,1); rhoL = zeros(T,1); sL = zeros(T,1);
+        uL = zeros(T,1); rollL = zeros(T,1);
+        tauBeforeL = zeros(T,1); maintPerfL = zeros(T,1);
+        
+        eps = 1.0;
+        
+        for t = 1:T
+            ih = toHbin(h); itau = toTaubin(tau); is = toSbin(s);
+            
+            % Valid Actions (Can only maintain if budget >= cost)
+            validActions = [1];
+            if b >= costHM, validActions = [validActions, 2]; end
+            
+            % Epsilon-Greedy Selection
+            qv = squeeze(Q(ih, itau, is, :));
+            [~, idxG] = max(qv(validActions));
+            aGreedy = validActions(idxG);
+            
+            if rand < eps
+                a = validActions(randi(length(validActions)));
+            else
+                a = aGreedy;
+            end
+            
+            % Execute Action
+            tau_before = tau;
+            u_t = 0.0;
+            if a == 2, u_t = costHM; end
+            
+            if u_t == 0
+                % Physics: Degradation
+                hNext = bound01(h - lambda1 * (tau^betaWear));
+                bNext = b;
+                tauNext = min(tau + 1, tauMax);
+            else
+                % Physics: Restoration
+                hNext = bound01(h - lambda1 * (tau^betaWear) + gainHM);
+                bNext = b - u_t;
+                tauNext = 0;
+            end
+            
+            % Rolling Stats
+            maintThisWeek = double(u_t > 0);
+            oldVal = rollBuf(bufPtr);
+            rollBuf(bufPtr) = maintThisWeek;
+            rollCount = rollCount - oldVal + maintThisWeek;
+            bufPtr = mod(bufPtr, weeksPerYear) + 1;
+            yearMaintCtr = yearMaintCtr + maintThisWeek;
+            
+            % End of Year Reset
+            if mod(t, weeksPerYear) == 0
+                yrIdx = t / weeksPerYear;
+                res.all_maintYearCount(yrIdx, iter) = yearMaintCtr;
+                res.all_spentU_byYear(yrIdx, iter) = 1.0 - bNext; 
+                yearMaintCtr = 0;
+                bNext = 1.0; % Refill Budget
+            end
+            
+            % Calculate Slack & Reward
+            sNext = clip(s - (u_t - uStar), -sMax, sMax);
+            bScoreNext = 1 - abs(sNext)/sMax;
+            
+            r = w_h * hNext + w_b * bScoreNext;
+            
+            % R-Learning Update
+            ihp = toHbin(hNext); itaup = toTaubin(tauNext); isp = toSbin(sNext);
+            qvp = squeeze(Q(ihp, itaup, isp, :));
+            
+            validNext = [1];
+            if bNext >= costHM, validNext = [validNext, 2]; end
+            Vsp = max(qvp(validNext));
+            Vs  = max(qv(validActions));
+            
+            Qa = Q(ih, itau, is, a);
+            delta = r - rho + Vsp - Qa;
+            Q(ih, itau, is, a) = Qa + alpha * delta;
+            
+            if a == aGreedy
+                rho = rho + betaRho * (r - rho + Vsp - Vs);
+            end
+            
+            % Record Data
+            rewL(t) = r; hL(t) = h; bL(t) = b; tauL(t) = tau; 
+            rhoL(t) = rho; sL(t) = s; uL(t) = u_t; rollL(t) = rollCount;
+            tauBeforeL(t) = tau_before; maintPerfL(t) = maintThisWeek;
+            
+            % Next State
+            h = hNext; b = bNext; tau = tauNext; s = sNext;
+            eps = max(epsMin, eps * epsDecay);
+        end
+        
+        % Store Logs
+        res.all_rewLog(:, iter)         = rewL;
+        res.all_hLog(:, iter)           = hL;
+        res.all_bLog(:, iter)           = bL;
+        res.all_tauLog(:, iter)         = tauL;
+        res.all_rhoLog(:, iter)         = rhoL;
+        res.all_sLog(:, iter)           = sL;
+        res.all_rollingMaint52(:, iter) = rollL;
+        
+        % Extract Tau at Maintenance (Last 80 years only)
+        cutoffIdx = max(0, (nYears - 80) * weeksPerYear);
+        maintIndices = find(maintPerfL == 1); 
+        validMaintIndices = maintIndices(maintIndices > cutoffIdx);
+        res.all_tauAtMaint{iter} = tauBeforeL(validMaintIndices);
+        
+        % Yearly Min Health
+        for y=1:nYears
+            i0 = (y-1)*weeksPerYear+1; 
+            i1 = y*weeksPerYear;
+            res.all_minHealth(y, iter) = min(hL(i0:i1));
+        end
+    end
+    
+    res.T = T;
+    res.xYear = (1:T)' / weeksPerYear;
+end
