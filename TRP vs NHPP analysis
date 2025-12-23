@@ -1,0 +1,241 @@
+TRP vs NHPP
+
+Weibull-Weibull Trend Renewal Process (TRP) vs. NHPP Analysis ToolThis MATLAB toolkit performs a comparative reliability analysis between a generalized Weibull-Weibull Trend Renewal Process (TRP) and a baseline Power Law Non-Homogeneous Poisson Process (NHPP). The TRP model generalizes the classic "minimal repair" NHPP by modeling the inter-arrival times—in a power-law transformed time domain—as Weibull distributed (shape parameter $c$), rather than Exponential ($c=1$). This allows the model to capture "imperfect" repair dynamics.The script estimates model parameters ($a, b, c$) via Maximum Likelihood Estimation (MLE) using the fmincon interior-point algorithm. It evaluates the statistical significance of the renewal parameter using a Likelihood Ratio Test (LRT) ($H_0: c=1$). Furthermore, it validates model adequacy by computing Cox-Snell residuals and performing an Anderson-Darling goodness-of-fit test. The test logic is rigorously defined to check against a Unit Exponential distribution (Stephens, 1986), ensuring that the fitted model accurately captures both the shape and the scale (frequency) of the observed failures.
+
+
+function TRPvNPP_12_23_2025(dataSets)
+% TRPvNPP_12_23_2025 - Comparative Reliability Analysis (TRP vs NHPP)
+%
+% USAGE:
+%   1. Load your data: load('my_data.mat')
+%   2. Run analysis:   TRPvNPP_12_23_2025
+%
+% INPUT:
+%   dataSets - Struct array with fields .name and .failureTimesCell
+
+    % --- Input Handling (Auto-detect from workspace) ---
+    % If you run the script without arguments, it grabs 'dataSets' from the workspace.
+    if nargin < 1
+        try
+            dataSets = evalin('base', 'dataSets');
+            fprintf('Variable "dataSets" found in workspace. Proceeding...\n');
+        catch
+            error('Error: "dataSets" variable not found. Please load your data first.');
+        end
+    end
+
+    % --- Optimization Options ---
+    % Defined line-by-line to prevent copy-paste syntax errors
+    options = optimoptions('fmincon');
+    options.Display = 'off';
+    options.Algorithm = 'interior-point';
+    options.FiniteDifferenceType = 'central';
+    options.HessianApproximation = 'bfgs';
+    options.MaxIterations = 1000;
+    options.MaxFunctionEvaluations = 5000;
+    options.StepTolerance = 1e-10;
+    options.OptimalityTolerance = 1e-10;
+
+    % Initialize results structure
+    resultsSummary = struct();
+
+    % --- Main Analysis Loop ---
+    for ds = 1:numel(dataSets)
+        failureTimesCell = dataSets(ds).failureTimesCell;
+        fprintf('Data Set %d (%s):\n', ds, dataSets(ds).name);
+        
+        % --- 1. Optimize TRP (3 parameters: a, b, c) ---
+        objFunTRP = @(params) negLogLikelihoodMulti(params, failureTimesCell);
+        
+        % Initial guess [a, b, c]
+        initial_params = [0.01, 1.0, 1.0]; 
+        lb = [1e-10, 1e-4, 1e-4];
+        ub = [inf,   inf,   inf];
+        
+        [est_TRP, negLL_TRP, exitflag1, ~, ~, ~, hessian] = ...
+            fmincon(objFunTRP, initial_params, [], [], [], [], lb, ub, [], options);
+        
+        if exitflag1 <= 0
+            warning('TRP optimization did not converge for %s (Flag: %d).', dataSets(ds).name, exitflag1);
+        end
+        
+        % Robust Covariance and CI Calculation
+        cov_TRP = NaN(3);
+        c_CI95 = [NaN, NaN];
+        
+        if ~isempty(hessian) && all(isfinite(hessian(:)))
+            % Check condition number
+            if rcond(hessian) < 1e-12
+                warning('TRP Hessian is ill-conditioned for %s; CIs unreliable.', dataSets(ds).name);
+            else
+                % Use backslash (\) for better numerical stability than inv()
+                cov_TRP = hessian \ eye(3);
+                std_errors = sqrt(abs(diag(cov_TRP))); 
+                
+                % 95% Wald CI for parameter c
+                c_est = est_TRP(3);
+                c_CI95 = [max(0, c_est - 1.96*std_errors(3)), c_est + 1.96*std_errors(3)];
+            end
+        end
+        
+        a_trp = est_TRP(1);
+        b_trp = est_TRP(2);
+        c_trp = est_TRP(3);
+        
+        % --- 2. Optimize Baseline NHPP (2 parameters: a, b; Fixed c=1) ---
+        objFunBase = @(p) negLogLikelihoodMulti([p(1), p(2), 1], failureTimesCell);
+        
+        initial_base = [0.01, 1.0]; 
+        lb2 = [1e-10, 1e-4];
+        ub2 = [inf,   inf];
+        
+        [est_base, negLL_base, exitflag2] = ...
+            fmincon(objFunBase, initial_base, [], [], [], [], lb2, ub2, [], options);
+            
+        if exitflag2 <= 0
+            warning('NHPP optimization did not converge for %s.', dataSets(ds).name);
+        end
+        
+        a_base = est_base(1);
+        b_base = est_base(2);
+        
+        % --- 3. Likelihood Ratio Test (H0: c = 1) ---
+        logL_TRP  = -negLL_TRP;
+        logL_base = -negLL_base;
+        
+        % Clamp to 0 to handle numerical noise
+        LRT_stat = max(0, 2 * (logL_TRP - logL_base)); 
+        p_value = 1 - chi2cdf(LRT_stat, 1); 
+
+        fprintf('  TRP LogL: %.3f | NHPP LogL: %.3f\n', logL_TRP, logL_base);
+        fprintf('  LRT Stat: %.3f (p = %.4f)\n', LRT_stat, p_value);
+        
+        if p_value < 0.05
+            fprintf('  => Reject H0 (c=1). TRP fits significantly better.\n');
+        else
+            fprintf('  => Fail to reject H0. NHPP (Minimal Repair) is adequate.\n');
+        end
+        
+        % --- 4. Goodness-of-Fit (Anderson-Darling on Residuals) ---
+        Z_trp  = getTransformedTimes(failureTimesCell, a_trp, b_trp, c_trp);
+        Z_base = getTransformedTimes(failureTimesCell, a_base, b_base, 1);
+        
+        critVal_5pct = 2.492; % Critical value for Unit Exponential (Stephens, 1974)
+        
+        [A2_trp, mean_Z_trp] = ADTestUnitExp(Z_trp);
+        [A2_base, mean_Z_base] = ADTestUnitExp(Z_base);
+        
+        fprintf('  Anderson-Darling Test on Residuals (Target: Mean=1):\n');
+        fprintf('    TRP:  A^2 = %.3f (Mean Z = %.2f) -> %s\n', ...
+            A2_trp, mean_Z_trp, getPassFail(A2_trp, critVal_5pct));
+        fprintf('    NHPP: A^2 = %.3f (Mean Z = %.2f) -> %s\n', ...
+            A2_base, mean_Z_base, getPassFail(A2_base, critVal_5pct));
+
+        % Store results
+        resultsSummary(ds).DataSet = dataSets(ds).name;
+        resultsSummary(ds).a_TRP   = a_trp;
+        resultsSummary(ds).b_TRP   = b_trp;
+        resultsSummary(ds).c_TRP   = c_trp;
+        resultsSummary(ds).a_NHPP  = a_base;
+        resultsSummary(ds).b_NHPP  = b_base;
+        resultsSummary(ds).LRT_p   = p_value;
+        resultsSummary(ds).c_sig_CI = (~isnan(c_CI95(1)) && (c_CI95(1) > 1 || c_CI95(2) < 1));
+        fprintf('\n');
+    end
+
+    % Display Table
+    summaryTable = struct2table(resultsSummary);
+    summaryTable.LRT_p = round(summaryTable.LRT_p, 4); 
+    disp('--- Model Comparison Summary ---');
+    disp(summaryTable);
+end
+
+% --- Helper Functions ---
+
+function s = getPassFail(stat, crit)
+    if stat < crit
+        s = 'PASS';
+    else
+        s = 'FAIL (Model Rejected)';
+    end
+end
+
+function negLL = negLogLikelihoodMulti(params, failureTimesCell)
+    % Calculates Negative Log-Likelihood in Log-Space for stability
+    a = params(1); b = params(2); c = params(3);
+    
+    if a <= 0 || b <= 0 || c <= 0, negLL = Inf; return; end
+    
+    lnL = 0;
+    for s = 1:length(failureTimesCell)
+        times = sort(failureTimesCell{s}); 
+        if isempty(times), continue; end
+        
+        prev = 0;
+        for t_curr = times(:)' 
+            if t_curr <= prev, negLL = Inf; return; end
+            
+            term_diff = t_curr^b - prev^b;
+            if term_diff <= 0, negLL = Inf; return; end
+            
+            % Log-Intensity
+            % ln(gamma) = c*ln(a) + ln(b) + ln(c) + (b-1)ln(t) + (c-1)ln(term_diff)
+            ln_gamma = c*log(a) + log(b) + log(c) + (b-1)*log(t_curr) + (c-1)*log(term_diff);
+            
+            % Cumulative Hazard (Integral)
+            % Lambda = (a^c) * term_diff^c
+            % We compute exp(log_Lambda) to avoid overflow of intermediate terms
+            Lambda_i = exp(c * (log(a) + log(term_diff)));
+            
+            if ~isfinite(ln_gamma) || ~isfinite(Lambda_i)
+                negLL = Inf; return;
+            end
+            
+            lnL = lnL + ln_gamma - Lambda_i;
+            prev = t_curr;
+        end
+    end
+    negLL = -lnL;
+end
+
+function Z = getTransformedTimes(failureTimesCell, a, b, c)
+    % Compute Cox-Snell residuals
+    Z = [];
+    for s = 1:length(failureTimesCell)
+        times = sort(failureTimesCell{s});
+        prev = 0;
+        for t_curr = times(:)'
+            term_diff = t_curr^b - prev^b;
+            if term_diff > 0
+                val = exp(c * (log(a) + log(term_diff))); 
+                if isfinite(val)
+                    Z(end+1,1) = val; %#ok<AGROW>
+                end
+            end
+            prev = t_curr;
+        end
+    end
+end
+
+function [A2, mean_Z] = ADTestUnitExp(Z)
+    % Anderson-Darling test for UNIT Exponentiality (Case 0)
+    % Ref: Stephens (1974/1986). Validates both shape and scale (Mean=1).
+    Z = Z(Z > 0 & isfinite(Z));
+    n = length(Z);
+    mean_Z = mean(Z); 
+    
+    if n < 2
+        A2 = NaN; return; 
+    end
+    
+    Z_sorted = sort(Z);
+    
+    % CDF of Unit Exponential (Mean=1)
+    F = 1 - exp(-Z_sorted);
+    % Bound to avoid log(0)
+    F = max(eps, min(1-eps, F));
+    
+    i = (1:n)';
+    % AD Statistic Formula
+    S = sum((2*i - 1) .* (log(F) + log(1 - flipud(F))));
+    A2 = -n - (1/n) * S;
