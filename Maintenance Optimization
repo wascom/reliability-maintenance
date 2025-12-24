@@ -1,0 +1,340 @@
+Algorithm Description
+The following MATLAB script, optimize_maintenance.m, implements the age-based mainte-
+nance optimization model presented in Chapter 4. The algorithm determines the optimal preventive
+replacement age τ∗ for vacuum circuit breakers subject to two competing failure modes:
+1. Minor Failure: Modeled as a Non-Homogeneous Poisson Process (NHPP) with Power Law
+intensity (minimal repair).
+2. Major Failure: Modeled as a Weibull Renewal Process (corrective replacement).
+To ensure modularity and reproducibility, the script imports economic and reliability parame-
+ters from an external configuration file (maintenance_config.csv). It calculates the exact cost
+rate density using numerical integration for the expected cycle length. Furthermore, it employs
+a parametric bootstrap technique (B = 1000 iterations) to quantify the uncertainty of the optimal
+policy, generating 95% confidence intervals for both the optimal age and the expected cost savings.
+
+
+
+Parameter,Value
+Cp,305000
+Cf,865000
+Cmr,140000
+beta1,1.884
+eta1,23.308
+beta2,3.150
+eta2,44.454
+n_breakers,16
+obs_window,120
+B_sims,1000
+alpha_ci,0.05
+
+
+
+
+%% Age-Based Maintenance Optimization for Vacuum Circuit Breakers
+%
+%  Description:
+%  Performs cost optimization to determine the optimal preventive replacement
+%  age (tau) by minimizing the expected long-run cost rate.
+%  
+%  Failure Modes Considered:
+%  1. Minor Failure: Minimal Repair (NHPP with Power Law Intensity)
+%  2. Major Failure: Corrective Replacement (Weibull Renewal Process)
+%
+%  Uncertainty Quantification:
+%  Uses Parametric Bootstrap (Monte Carlo) to generate 95% Confidence 
+%  Intervals for the cost curve and optimal age.
+%
+%  Input:
+%  - maintenance_config.csv: A CSV file with 'Parameter' and 'Value' columns.
+%
+%  Output:
+%  - Optimal age tau*
+%  - Visualizations of intensity functions, cost curves, and uncertainty.
+%
+%  Date: 2025-06-18
+
+clearvars; close all; clc;
+
+%% 1. DATA IMPORT & CONFIGURATION
+% -------------------------------------------------------------------------
+fprintf('Initializing system parameters...\n');
+dataFile = 'maintenance_config.csv';
+
+if ~isfile(dataFile)
+    error('Configuration file "%s" not found.', dataFile);
+end
+
+% Load parameters from external generic source
+T = readtable(dataFile);
+
+% Helper function to extract parameter values by name safely
+getParam = @(name) T.Value(strcmpi(T.Parameter, name));
+
+try
+    % Economic Parameters ($)
+    Cp  = getParam('Cp');   % Preventive Replacement Cost
+    Cf  = getParam('Cf');   % Corrective Replacement Cost (Major)
+    Cmr = getParam('Cmr');  % Minimal Repair Cost (Minor)
+
+    % Reliability Parameters (Mode 1: Minor - NHPP)
+    beta1_true = getParam('beta1'); 
+    eta1_true  = getParam('eta1');
+    
+    % Reliability Parameters (Mode 2: Major - Weibull)
+    beta2_true = getParam('beta2'); 
+    eta2_true  = getParam('eta2');
+
+    % Simulation Settings
+    n_breakers = getParam('n_breakers'); % Number of units observed
+    obs_window = getParam('obs_window'); % Observation window (months)
+    B_sims     = getParam('B_sims');     % Bootstrap iterations
+    alpha_ci   = getParam('alpha_ci');   % Significance level (e.g., 0.05)
+catch
+    error('Error parsing parameters. Ensure CSV has "Parameter" and "Value" columns.');
+end
+
+% Plotting Grid (Vectorized based on observation window)
+tau_max_plot = obs_window; 
+tau_vec = 0.5:0.5:tau_max_plot; 
+
+% Verify Toolbox Dependencies
+if isempty(which('wblrnd'))
+    error('Statistics and Machine Learning Toolbox is required.');
+end
+
+%% 2. BASELINE OPTIMIZATION (DETERMINISTIC)
+% -------------------------------------------------------------------------
+fprintf('Running baseline optimization...\n');
+
+% Define exact cost function handle
+costFunc = @(t) cost_rate_exact(t, beta1_true, eta1_true, ...
+                                   beta2_true, eta2_true, Cp, Cf, Cmr);
+
+% Calculate Baseline Cost Curve for Visualization
+CR_vec = arrayfun(costFunc, tau_vec);
+
+% Find Exact Minimum using Scalar Optimization
+options = optimset('TolX', 1e-6);
+[tau_opt_base, min_cost_base] = fminbnd(costFunc, 1, tau_max_plot, options);
+
+fprintf('Optimal Age (Base):     %.2f months\n', tau_opt_base);
+fprintf('Min Cost Rate (Base):   $%.2f / month\n', min_cost_base);
+
+%% 3. PARAMETRIC BOOTSTRAP SIMULATION
+% -------------------------------------------------------------------------
+fprintf('\nRunning Parametric Bootstrap (%d iterations)...\n', B_sims);
+
+% Setup Parallel Pool if available
+pool_obj = gcp('nocreate');
+if B_sims > 100 && isempty(pool_obj)
+    try parpool; catch, end
+end
+
+% Pre-allocation
+tau_star_boot = zeros(B_sims, 1);
+CR_boot_matrix = zeros(length(tau_vec), B_sims);
+
+% Set Random Stream for Reproducibility
+rng(42); 
+tic;
+
+parfor b = 1:B_sims
+    % --- A. Simulate Synthetic Field Data ---
+    sim_t2_failures = []; 
+    sim_t2_censored = []; 
+    sim_t1_counts   = 0;
+    
+    for k = 1:n_breakers
+        % Mode 2 (Major): Weibull random draw
+        t_fail = wblrnd(eta2_true, beta2_true);
+        t_end = min(t_fail, obs_window);
+        
+        if t_fail <= obs_window
+            sim_t2_failures = [sim_t2_failures; t_fail];
+        else
+            sim_t2_censored = [sim_t2_censored; obs_window];
+        end
+        
+        % Mode 1 (Minor): NHPP Event Count
+        n_expected = (t_end/eta1_true)^beta1_true;
+        sim_t1_counts = sim_t1_counts + poissrnd(n_expected);
+    end
+    
+    % --- B. Re-estimate Parameters (MLE) ---
+    try
+        % Mode 2: Weibull MLE
+        all_t2 = [sim_t2_failures; sim_t2_censored];
+        cens_flag = [zeros(length(sim_t2_failures),1); ones(length(sim_t2_censored),1)];
+        
+        if isempty(sim_t2_failures)
+            % Fallback if simulation yields perfect survival (rare)
+            eta2_b = eta2_true; beta2_b = beta2_true;
+        else
+            par_hat_2 = wblfit(all_t2, alpha_ci, cens_flag);
+            eta2_b = par_hat_2(1);
+            beta2_b = par_hat_2(2);
+        end
+        
+        % Mode 1: NHPP Approximation
+        n_t1 = sim_t1_counts;
+        if n_t1 > 0
+            % Approximate Standard Error for perturbation
+            se_beta1 = beta1_true / sqrt(n_t1);
+            se_eta1  = eta1_true / (beta1_true * sqrt(n_t1));
+            
+            beta1_b = max(0.1, normrnd(beta1_true, se_beta1));
+            eta1_b  = max(0.1, normrnd(eta1_true, se_eta1));
+        else
+            beta1_b = beta1_true; eta1_b = eta1_true;
+        end
+    catch
+        % Fallback for convergence failures
+        beta1_b = beta1_true; eta1_b = eta1_true;
+        beta2_b = beta2_true; eta2_b = eta2_true;
+    end
+    
+    % --- C. Re-Optimize for Bootstrap Sample ---
+    
+    % 1. Find Exact Optimum (Scalar)
+    func_b = @(t) cost_rate_exact(t, beta1_b, eta1_b, beta2_b, eta2_b, Cp, Cf, Cmr);
+    tau_star_boot(b) = fminbnd(func_b, 1, tau_max_plot);
+    
+    % 2. Generate Curve (Fast Vectorized Approximation)
+    R2_v = exp(-(tau_vec./eta2_b).^beta2_b);
+    F2_v = 1 - R2_v;
+    
+    lam1_v = (beta1_b/eta1_b) .* (tau_vec./eta1_b).^(beta1_b-1);
+    integrand = lam1_v .* R2_v;
+    
+    % Cumulative integration (cumtrapz is faster than integral inside loop)
+    t_aug = [0, tau_vec];
+    int_aug = [0, integrand];
+    R2_aug = [1, R2_v];
+    
+    E_N_mr_v = cumtrapz(t_aug, int_aug);
+    E_L_v    = cumtrapz(t_aug, R2_aug);
+    
+    % Adjust dimensions (remove t=0)
+    E_N_mr_v = E_N_mr_v(2:end);
+    E_L_v    = E_L_v(2:end);
+    
+    CR_boot_matrix(:, b) = (Cp.*R2_v + Cf.*F2_v + Cmr.*E_N_mr_v) ./ E_L_v;
+end
+
+t_elap = toc;
+fprintf('Bootstrap completed in %.2f seconds.\n', t_elap);
+
+% Calculate Statistics
+ci_tau = prctile(tau_star_boot, [100*alpha_ci/2, 100*(1-alpha_ci/2)]);
+ci_cost_curve = prctile(CR_boot_matrix, [2.5, 97.5], 2);
+fprintf('95%% CI for tau*:        [%.2f, %.2f] months\n', ci_tau(1), ci_tau(2));
+
+%% 4. VISUALIZATION
+% -------------------------------------------------------------------------
+set(0, 'DefaultAxesFontName', 'Times New Roman');
+set(0, 'DefaultTextFontName', 'Times New Roman');
+
+% --- Figure 1: Failure Intensity Functions ---
+figure('Units', 'pixels', 'Position', [100 100 800 600], 'Color', 'w');
+t_plot = 0.1:0.1:(obs_window/2);
+lam1_p = (beta1_true/eta1_true) .* (t_plot./eta1_true).^(beta1_true-1);
+h2_p   = (beta2_true/eta2_true) .* (t_plot./eta2_true).^(beta2_true-1);
+
+plot(t_plot, lam1_p, 'b--', 'LineWidth', 2); hold on;
+plot(t_plot, h2_p, 'r-', 'LineWidth', 2);
+plot(t_plot, lam1_p + h2_p, 'k-', 'LineWidth', 2.5);
+
+grid on; box on;
+set(gca, 'XColor', 'k', 'YColor', 'k', 'FontSize', 12, 'LineWidth', 1.5);
+legend({'Minor Failure Intensity', 'Major Failure Hazard', 'Total System Intensity'}, ...
+       'Location', 'NorthWest', 'EdgeColor', 'k');
+xlabel('Time (Months)', 'FontSize', 14);
+ylabel('Instantaneous Rate \lambda(t)', 'FontSize', 14);
+title('Failure Intensity Functions', 'FontSize', 16);
+
+% --- Figure 2: Cost Optimization with Uncertainty ---
+figure('Units', 'pixels', 'Position', [150 150 900 600], 'Color', 'w');
+% Plot CI Band
+x_fill = [tau_vec, fliplr(tau_vec)];
+y_fill = [ci_cost_curve(:,1)', fliplr(ci_cost_curve(:,2)')];
+h_fill = fill(x_fill, y_fill, [0.7 0.7 0.7], 'EdgeColor', 'none'); 
+set(h_fill, 'FaceAlpha', 0.4); hold on;
+
+% Plot Base Curve & Opt Point
+plot(tau_vec, CR_vec, 'k-', 'LineWidth', 2.5);
+plot(tau_opt_base, min_cost_base, 'ro', 'MarkerSize', 10, 'MarkerFaceColor', 'r');
+
+% Reference Lines
+xline(tau_opt_base, 'r--', 'LineWidth', 1.5);
+yline(min_cost_base, 'r--', 'LineWidth', 1.5);
+
+grid on; box on;
+set(gca, 'XColor', 'k', 'YColor', 'k', 'FontSize', 12, 'LineWidth', 1.5);
+xlim([0 tau_max_plot]);
+ylim([min(ci_cost_curve(:))*0.8, min(ci_cost_curve(:))*2.0]);
+xlabel('Replacement Age \tau (Months)', 'FontSize', 14);
+ylabel('Expected Cost Rate ($/Month)', 'FontSize', 14);
+title('Maintenance Cost Optimization', 'FontSize', 16);
+
+% Annotation
+rtf_cost = CR_vec(end); 
+savings = (rtf_cost - min_cost_base) / rtf_cost * 100;
+str = {sprintf('Run-to-Failure: $%.0f', rtf_cost), ...
+       sprintf('Savings: %.1f%%', savings)};
+annotation('textbox', [0.6 0.45 0.2 0.1], 'String', str, 'FitBoxToText', 'on', ...
+           'BackgroundColor', 'w', 'EdgeColor', 'k', 'FontName', 'Times New Roman');
+
+legend({'95% Bootstrap CI', 'Expected Cost Rate', ...
+        sprintf('Optimal \\tau^* = %.1f', tau_opt_base)}, ...
+       'Location', 'NorthEast', 'EdgeColor', 'k');
+
+% --- Figure 3: Optimal Age Distribution ---
+figure('Units', 'pixels', 'Position', [200 200 800 600], 'Color', 'w');
+histogram(tau_star_boot, 40, 'FaceColor', [0.2 0.6 0.8], ...
+          'Normalization', 'pdf', 'EdgeColor', 'w');
+hold on;
+xline(tau_opt_base, 'r', 'LineWidth', 2);
+xline(ci_tau(1), 'k--', 'LineWidth', 1.5);
+xline(ci_tau(2), 'k--', 'LineWidth', 1.5);
+
+grid on; box on;
+set(gca, 'XColor', 'k', 'YColor', 'k', 'FontSize', 12, 'LineWidth', 1.5);
+xlabel('Optimal Replacement Age \tau^* (Months)', 'FontSize', 14);
+ylabel('Probability Density', 'FontSize', 14);
+title('Distribution of Optimal Replacement Age', 'FontSize', 16);
+legend({'Bootstrap Samples', 'Deterministic Opt', '95% CI'}, ...
+       'Location', 'NorthEast', 'EdgeColor', 'k');
+
+%% 5. AUXILIARY FUNCTIONS
+% -------------------------------------------------------------------------
+function CR = cost_rate_exact(tau, b1, e1, b2, e2, Cp, Cf, Cmr)
+% COST_RATE_EXACT Calculates the long-run cost rate.
+%
+% Inputs:
+%   tau            - Preventive replacement age
+%   b1, e1         - Mode 1 (Minor) parameters (beta, eta)
+%   b2, e2         - Mode 2 (Major) parameters (beta, eta)
+%   Cp, Cf, Cmr    - Cost parameters
+%
+% Output:
+%   CR             - Expected cost per unit time
+
+    if tau <= 1e-4, CR = Inf; return; end
+    
+    % Reliability Functions (Mode 2)
+    R2 = exp(-(tau/e2)^b2);
+    F2 = 1 - R2;
+    
+    % Expected Cycle Length E[L]
+    % Analytic solution: eta * Gamma(1+1/b) * P(1/b, (tau/eta)^b)
+    val_gamma = gamma(1 + 1/b2);
+    val_inc   = gammainc((tau/e2)^b2, 1/b2);
+    E_L = e2 * val_gamma * val_inc;
+    
+    % Expected Minimal Repair Cost
+    % Integral of intensity(t) * Survival(t)
+    mr_func = @(t) ((b1/e1) .* (t./e1).^(b1-1)) .* exp(-(t./e2).^b2);
+    E_N_mr = integral(mr_func, 0, tau, 'AbsTol', 1e-4, 'RelTol', 1e-4);
+    
+    % Total Cost Rate Equation
+    CR = (Cp * R2 + Cf * F2 + Cmr * E_N_mr) / E_L;
+end
