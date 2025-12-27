@@ -3,23 +3,22 @@ Synthetic Data Generation for Weibull-Weibull Trend-Renewal Processes
 
 To validate reliability models, a Monte Carlo simulation algorithm was developed to generate synthetic failure times following a Weibull-Weibull Trend-Renewal Process (TRP). This stochastic framework generalizes both the Non-Homogeneous Poisson Process (NHPP) and the Renewal Process (RP) by characterizing the failure intensity $\lambda(t)$ as a function of both the global system age $t$ (trend) and the time elapsed since the most recent failure $\tau$ (renewal).The generator employs the Inverse Transform Sampling method. To ensure high computational efficiency and numerical stability, the algorithm utilizes the closed-form analytical inversion of the cumulative intensity function rather than iterative numerical integration. For a given scale ($a$), trend ($b$), and renewal ($c$) parameter, the next failure time $t_{i}$ is derived algebraically from the previous failure time $t_{i-1}$ and a uniform random variate $U \sim \text{Uniform}(0,1)$ via the equation:$$ t_{i} = \left[ t_{i-1}^b + \frac{1}{a} (-\ln U)^{1/c} \right]^{1/b} $$This analytical approach allows for the rapid generation of large-scale datasets to analyze the convergence of failure rate estimators and visualize the evolution of the intensity function.
 
-
-% TRP Failure Times Generation (Weibull-Weibull Intensity)
+% TRP Failure Times Generation (Weibull-Weibull Intensity) with MCF Plot
 clc;
 clear;
 close all;
 
 % --- Simulation Parameters ---
-num_simulations = 250; 
-t_simulation = 16000; 
+num_simulations = 160; 
+t_simulation = 5000; 
 
 % --- Model Parameters ---
 % a: Scale Parameter
-a = 0.000028; 
+a = 0.00000191; 
 % b: Trend Parameter (b > 1: Aging/Deterioration)
-b = 1.232439; 
+b = 1.711; 
 % c: Renewal Parameter (c > 1: Increasing intensity since last event)
-c = 1.189540; 
+c = 1.39; 
 
 % Pre-calculate constant for intensity visualization later
 const = (a^c) * b * c;
@@ -27,9 +26,10 @@ const = (a^c) * b * c;
 % Initialize arrays
 average_failure_rates = zeros(num_simulations, 1);
 avg_rate_evolution = zeros(num_simulations, 1);
+num_failures_array = zeros(num_simulations, 1); 
 
 % Storage for visualization
-all_failure_times = {}; % Stores events from ALL simulations for histogram
+all_failure_times = {}; % Stores events from ALL simulations
 last_sim_events = [];   % Stores only the last simulation for sample path plots
 
 % --- Simulation Loop ---
@@ -45,8 +45,6 @@ for sim = 1:num_simulations
         U = rand();
         
         % --- ANALYTICAL INVERSE TRANSFORM SAMPLING ---
-        % ERROR FIX: The original code used 'integral' and 'fzero', which is
-        % slow and unstable. We solve for t algebraically instead.
         % Cumulative Hazard H(t) = a^c * (t^b - t_n^b)^c
         % Inversion Formula: t_{n+1} = [ t_n^b + (1/a)*(-ln(U))^(1/c) ]^(1/b)
         
@@ -71,8 +69,9 @@ for sim = 1:num_simulations
         last_sim_events = event_times;
     end
     
-    % Compute average failure rate for this simulation
+    % Compute stats for this simulation
     num_failures = length(event_times);
+    num_failures_array(sim) = num_failures;
     average_failure_rates(sim) = num_failures / t_simulation;
     
     % Update running average
@@ -83,7 +82,12 @@ end
 
 % Display final statistics
 final_avg_failure_rate = mean(average_failure_rates);
+avg_failures_per_sim = mean(num_failures_array);
+
+fprintf('--------------------------------------------------\n');
 fprintf('Final Averaged Average Failure Rate: %.6f failures/unit time\n', final_avg_failure_rate);
+fprintf('Average Number of Failures per Simulation: %.2f\n', avg_failures_per_sim);
+fprintf('--------------------------------------------------\n');
 
 % 1. Convergence of Failure Rate
 figure;
@@ -94,7 +98,6 @@ ylabel('Cumulative Average Failure Rate');
 grid on;
 
 % 2. Histogram of All Generated Events
-% FIX: Aggregates data from ALL simulations, not just the last one.
 figure;
 all_events_vector = vertcat(all_failure_times{:}); 
 histogram(all_events_vector, 50);
@@ -104,7 +107,6 @@ ylabel('Frequency');
 grid on;
 
 % 3. Intensity Function (Sample Path: Last Simulation Only)
-% Visualizes the stochastic intensity for the final run.
 figure;
 t_plot = linspace(0, t_simulation, 1000);
 gamma_t_plot = zeros(size(t_plot));
@@ -138,3 +140,29 @@ if ~isempty(last_sim_events)
     ylabel('Cumulative Failures N(t)');
     grid on;
 end
+
+% 5. [NEW] Mean Cumulative Function (MCF) - Averaged across ALL simulations
+% Combine all event times and sort them
+sorted_all_events = sort(all_events_vector);
+
+% Calculate the cumulative mean count
+% For any time t, the MCF is (Total Failures across all sims <= t) / num_simulations
+% This is equivalent to stepping up by (1/num_simulations) at every event time.
+y_mcf = (1:length(sorted_all_events))' / num_simulations;
+
+% Add boundary points for plotting (0,0) and the end of simulation time
+t_mcf_plot = [0; sorted_all_events; t_simulation];
+y_mcf_plot = [0; y_mcf; y_mcf(end)];
+
+figure;
+stairs(t_mcf_plot, y_mcf_plot, 'r', 'LineWidth', 2);
+title(['Mean Cumulative Function (MCF) Averaged over ', num2str(num_simulations), ' Simulations']);
+xlabel('Time t');
+ylabel('Mean Cumulative Failures E[N(t)]');
+grid on;
+
+% Add reference line for the calculated average
+hold on;
+plot([0 t_simulation], [0 avg_failures_per_sim], 'k--', 'LineWidth', 1);
+legend('MCF Curve', 'Expected Linear Trend (Avg)', 'Location', 'northwest');
+hold off;
