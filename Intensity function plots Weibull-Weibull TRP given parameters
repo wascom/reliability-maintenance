@@ -1,0 +1,122 @@
+
+
+
+%% Main Execution Block
+%  Change parameters here and run (F5).
+clc;
+clear;
+close all;
+
+% --- USER INPUTS ---
+a = 0.002; 
+b = 1.5;  % Global Trend Shape (b > 1: Aging, b < 1: Improving)
+c = 1.25;  % Local Renewal Shape (c > 1: Wear-out, c < 1: Infant Mortality)
+
+% --- RUN FUNCTION ---
+plot_trp_intensity_docked(a, b, c);
+
+
+%% Local Function Definition
+function plot_trp_intensity_docked(a, b, c)
+% PLOT_TRP_INTENSITY_DOCKED Plots TRP Intensity in a docked window
+%
+%   This function calculates the intensity and plots it directly into
+%   the MATLAB desktop layout (docked).
+
+    fprintf('--------------------------------------------------\n');
+    fprintf('Generating TRP Plot (Docked)...\n');
+    fprintf('Parameters: a=%.4f, b=%.2f, c=%.2f\n', a, b, c);
+    fprintf('--------------------------------------------------\n');
+
+    % --- 1. Simulation Setup ---
+    failure_times = [200, 400, 600, 800]; 
+    t_max = 1000;
+    dt = 0.1; 
+    t = dt:dt:t_max;
+    
+    % --- 2. Vectorized History Construction ---
+    T_last = zeros(size(t));
+    for k = 1:length(failure_times)
+        f_time = failure_times(k);
+        mask = t > f_time;
+        T_last(mask) = f_time;
+    end
+    
+    % --- 3. Intensity Calculation ---
+    % Formula: gamma(t) = (a^c * b * c) * t^(b-1) * (t^b - T_last^b)^(c-1)
+    coeff = (a^c) * b * c;
+    trend_term = t.^(b-1);
+    
+    % max(..., eps) prevents NaN if t is exactly a failure time
+    renewal_base = max(t.^b - T_last.^b, eps); 
+    renewal_term = renewal_base.^(c-1);
+    
+    % Ensure output is real (handles numerical noise in complex powers)
+    gamma = real(coeff .* trend_term .* renewal_term);
+    
+    % --- 4. Singularity Handling (Smart View Limits) ---
+    if c < 1
+        finite_vals = gamma(isfinite(gamma));
+        if ~isempty(finite_vals)
+            % CORRECTION: Use Median instead of 98th percentile.
+            % P98 is too high for c=0.8, causing the baseline to look invisible.
+            % Scaling to 5x the median shows the trend while clipping the singularity.
+            p50 = median(finite_vals);
+            y_view_max = p50 * 5; 
+            fprintf('Singularity detected (c < 1). Y-axis view clipped at %.4f (5x Median).\n', y_view_max);
+        else
+            y_view_max = 10;
+        end
+    else
+        y_view_max = max(gamma) * 1.1;
+    end
+    
+    % --- 5. Visualization (DOCKED) ---
+    figure('Color', 'w', 'Name', 'TRP Intensity', 'WindowStyle', 'docked');
+    
+    % Main intensity plot
+    plot(t, gamma, 'b-', 'LineWidth', 1.5); hold on;
+    
+    % Apply Smart Axis Clipping
+    ylim([0, y_view_max]);
+    y_limits = ylim; 
+    
+    % Add vertical lines for failure events
+    for k = 1:length(failure_times)
+        ft = failure_times(k);
+        line([ft ft], [0 y_limits(2)], 'Color', 'r', 'LineStyle', '--', 'LineWidth', 1.5);
+        text(ft, 0, sprintf(' T_{%d}', k),...
+             'VerticalAlignment', 'bottom', 'Color', 'r', 'FontSize', 10, ...
+             'BackgroundColor', 'w', 'EdgeColor', 'none', 'Margin', 2);
+    end
+    
+    % Annotations
+    title_str = sprintf('TRP Intensity Function\nParameters: a=%.4f, b=%.2f, c=%.2f', a, b, c);
+    title(title_str, 'FontSize', 12, 'FontWeight', 'bold', 'Interpreter', 'none');
+    xlabel('Time (t)', 'FontSize', 11, 'FontWeight', 'bold');
+    ylabel('Intensity \gamma(t)', 'FontSize', 11, 'FontWeight', 'bold');
+    
+    grid on;
+    set(gca, 'GridAlpha', 0.3);
+    legend({'Intensity \gamma(t)', 'Imposed Failures'}, 'Location', 'northeast');
+    
+    % Dynamic Text Box 
+    if b > 1, trend_desc = 'Aging (b>1)';
+    elseif b < 1, trend_desc = 'Improving (b<1)';
+    else, trend_desc = 'Stable Trend (b=1)'; end
+    
+    if c > 1, renew_desc = 'Wear-out (c>1)';
+    elseif c < 1, renew_desc = 'Infant Mort. (c<1)';
+    else, renew_desc = 'Random Failures (c=1)'; end
+    
+    str = {['Global: ' trend_desc], ['Local: ' renew_desc]};
+    
+    % CORRECTION: Moved text box to bottom right to avoid covering start-up spikes
+    dim = [0.65 0.15 0.2 0.1]; 
+    
+    annotation('textbox', dim, 'String', str, 'FitBoxToText', 'on',...
+               'BackgroundColor', 'white', 'EdgeColor', 'black', 'FontSize', 9);
+            
+    hold off;
+    shg; % Show Graph (brings figure to front)
+    drawnow;
