@@ -1,0 +1,674 @@
+clc;
+clear;
+close all;
+
+%% RPT Stand — Average-Reward (R-Learning) vs Baseline vs DQN
+% Goal: ~90% annual spend with a single maintenance action.
+%
+% MAJOR SCIENTIFIC UPDATES:
+% 1. "Uncapped Physics": 'tauPhys' (unbounded) drives degradation.
+% 2. Extended Horizon: 2,000 years to ensure convergence.
+% 3. Models: R-Learning (Proposed), Baseline, and Discounted Q-Learning (DQN).
+
+% Set seed for reproducibility
+rng(7);
+
+%% ----------------------- Default Configuration -------------------------
+defaultParams.nIterations = 50;   % Number of full model runs
+defaultParams.nYears      = 2000; % EXTENDED: Training years
+defaultParams.lambda1     = 0.002;
+defaultParams.betaWear    = 1.20;
+defaultParams.gainHM      = 0.12; % Additive gain (Partial Repair)
+defaultParams.costHM      = 0.04;
+defaultParams.w_h         = 0.90;
+defaultParams.w_b         = 0.10;
+defaultParams.alpha       = 0.10;
+defaultParams.betaRho     = 0.01;
+defaultParams.gamma       = 0.99; % Discount factor for DQN
+defaultParams.epsMin      = 0.005;
+defaultParams.epsDecay    = 0.9995;
+defaultParams.tauMax      = 8;    % Agent memory cap
+defaultParams.sMax        = 0.20;
+
+%% ======================= RUN SIMULATIONS ===============================
+
+% 1. Run R-Learning Agent (Proposed Method)
+fprintf('Running R-Learning Simulation (N=%d, Years=%d)...\n', ...
+    defaultParams.nIterations, defaultParams.nYears);
+baseRes = run_simulation_rlearning(defaultParams);
+
+% 2. Run Discounted Q-Learning (DQN Equivalent)
+fprintf('Running Discounted Q-Learning (DQN) Simulation...\n');
+dqnRes = run_simulation_dqn(defaultParams);
+
+% 3. Run Fixed-Interval Baseline (Benchmark)
+fprintf('Running Fixed-Interval Baseline Simulation...\n');
+baselineRes = run_fixed_simulation(defaultParams);
+
+%% ======================= PERFORMANCE TABLE =============================
+% Filter Data: Steady state defined as the last 500 years
+steadyYears = 500;
+steadyStartYear = defaultParams.nYears - steadyYears;
+steadyStartWeek = steadyStartYear * 52 + 1;
+
+% -- Helper to extract stats --
+getStats = @(res, startY, startW) deal( ...
+    mean(reshape(res.all_spentU_byYear(startY+1:end, :), [], 1)) * 100, ... % Util
+    mean(reshape(res.all_hLog(startW:end, :), [], 1)), ...                   % Mean Health
+    std(reshape(res.all_hLog(startW:end, :), [], 1)), ...                    % Std Health
+    mean(reshape(res.all_minHealth(startY+1:end, :), [], 1)) ...             % Min Health
+);
+
+[rl_Util, rl_MeanH, rl_StdH, rl_MinH] = getStats(baseRes, steadyStartYear, steadyStartWeek);
+[dqn_Util, dqn_MeanH, dqn_StdH, dqn_MinH] = getStats(dqnRes, steadyStartYear, steadyStartWeek);
+[bl_Util, bl_MeanH, bl_StdH, bl_MinH] = getStats(baselineRes, steadyStartYear, steadyStartWeek);
+
+% -- Print Table --
+fprintf('\n========================================================================================\n');
+fprintf('                  PERFORMANCE COMPARISON (Steady State: Last %d Years)                 \n', steadyYears);
+fprintf('========================================================================================\n');
+fprintf('| %-20s | %-10s | %-12s | %-12s | %-12s |\n', 'Metric', 'Target', 'Baseline', 'DQN', 'R-Learning');
+fprintf('|----------------------|------------|--------------|--------------|--------------|\n');
+fprintf('| %-20s | %-10s | %11.2f%% | %11.2f%% | %11.2f%% |\n', 'Budget Utilization', '~90.0%', bl_Util, dqn_Util, rl_Util);
+fprintf('| %-20s | %-10s | %12.3f | %12.3f | %12.3f |\n', 'Mean Annual Health', 'Max', bl_MeanH, dqn_MeanH, rl_MeanH);
+fprintf('| %-20s | %-10s | %12.3f | %12.3f | %12.3f |\n', 'Yearly Min. Health', '> 0.80', bl_MinH, dqn_MinH, rl_MinH);
+fprintf('| %-20s | %-10s | %12.3f | %12.3f | %12.3f |\n', 'Health Std. Dev.', 'Min', bl_StdH, dqn_StdH, rl_StdH);
+fprintf('========================================================================================\n\n');
+
+%% ======================= PLOTTING ======================================
+% --- Publication-Quality Figure Formatting Settings ---
+set(groot, 'DefaultFigureUnits', 'centimeters', ...
+    'DefaultFigurePosition', [5, 5, 14, 10], ...
+    'DefaultAxesFontName', 'Times New Roman', ...
+    'DefaultTextFontName', 'Times New Roman', ...
+    'DefaultAxesFontSize', 12, ...            
+    'DefaultTextFontSize', 12, ...            
+    'DefaultLineLineWidth', 1.5, ...          
+    'DefaultLineMarkerSize', 6, ...
+    'DefaultAxesTickLabelInterpreter', 'tex', ...
+    'DefaultLegendInterpreter', 'tex', ...
+    'DefaultFigureColor', 'white');
+
+% --- GLOBAL COLOR MAP ---
+colHealth  = [0, 0.447, 0.741];     % Blue
+colReward  = [0.635, 0.078, 0.184]; % Red
+colTau     = [0.466, 0.674, 0.188]; % Green
+colBudget  = [0.850, 0.325, 0.098]; % Orange
+colRho     = [0.494, 0.184, 0.556]; % Purple
+colMaint   = [0.301, 0.745, 0.933]; % Cyan
+colSlack   = [0.750, 0.000, 0.750]; % Magenta
+
+% Common Axis Variables
+xYear = baseRes.xYear;
+xlimYears = [0, defaultParams.nYears];
+yearTicks = 0:250:defaultParams.nYears;
+years = (1:defaultParams.nYears)';
+
+% 1) Learning curve
+figure(1);
+plot_with_ci(xYear, movmean(baseRes.all_rewLog, 52), colReward);
+xlabel('Year'); ylabel('Reward (52w avg)'); grid on;
+title('Mean Learning Curve');
+xlim(xlimYears); xticks(yearTicks);
+
+% 2) Average-reward
+figure(2);
+plot_with_ci(xYear, baseRes.all_rhoLog, colRho);
+xlabel('Year'); ylabel('\rho estimate'); grid on;
+title('Mean Avg-Reward Estimate');
+xlim(xlimYears); xticks(yearTicks);
+
+% 3) State trajectories
+figure(3);
+sgtitle('Mean State Trajectories');
+subplot(4,1,1); plot_with_ci(xYear, baseRes.all_hLog, colHealth);
+ylabel('h'); grid on; xlim(xlimYears); xticks([]);
+subplot(4,1,2); plot_with_ci(xYear, baseRes.all_bLog, colBudget);
+ylabel('b'); grid on; xlim(xlimYears); xticks([]);
+subplot(4,1,3); plot_with_ci(xYear, baseRes.all_tauLog, colTau);
+ylabel('\tau_{phys}'); grid on; xlim(xlimYears); xticks([]);
+subplot(4,1,4); plot_with_ci(xYear, baseRes.all_rewLog, colReward);
+ylabel('r'); xlabel('Year'); grid on; xlim(xlimYears); xticks(yearTicks);
+
+% 4) Running Averages
+figure(4);
+yyaxis left
+hLineH = plot_with_ci(xYear, movmean(baseRes.all_hLog, 52), colHealth); 
+hold on;
+hLineR = plot_with_ci(xYear, movmean(baseRes.all_rewLog, 52), colReward, '--');
+ylabel('Value (h, r)'); 
+set(gca, 'YColor', 'k'); 
+grid on;
+yyaxis right
+hLineTau = plot_with_ci(xYear, movmean(baseRes.all_tauLog, 52), colTau);
+ylabel('Physical Age (\tau_{phys})');
+set(gca, 'YColor', colTau); 
+xlabel('Year'); 
+title('Mean Running Averages (N=50, 1 year window)'); 
+xlim(xlimYears); xticks(yearTicks);
+lgd4 = legend([hLineH, hLineR, hLineTau], ...
+    {'Mean Health (h)', 'Mean Reward (r)', 'Mean \tau'}, ...
+    'Location', 'north', 'Orientation', 'horizontal');
+set(lgd4, 'Box', 'on', 'Color', 'w', 'EdgeColor', [0.15 0.15 0.15]);
+
+% 5) Mean Budget Slack
+figure(5);
+plot_with_ci(xYear, baseRes.all_sLog, colSlack, '-', 0.45);
+hold on;
+yline(0, 'k:'); 
+xlabel('Year'); ylabel('Budget Slack (s)'); 
+ylim([-defaultParams.sMax, defaultParams.sMax]); grid on;
+title('Mean Budget Slack (95% CI)');
+xlim(xlimYears); xticks(yearTicks);
+
+% 6) Rolling maintenance
+figure(6);
+plot_with_ci(xYear, baseRes.all_rollingMaint52, colMaint);
+xlabel('Year'); ylabel('Maint count (52w)');
+title('Rolling 52-wk Maintenance');
+grid on; xlim(xlimYears); xticks(yearTicks);
+
+% 7) Histogram of tau (Tau -> Green)
+figure(7);
+all_tau = cat(1, baseRes.all_tauAtMaint{:});
+if ~isempty(all_tau)
+    maxObserved = max(all_tau);
+    binEnd = max(defaultParams.tauMax+0.5, maxObserved+0.5);
+    histogram(all_tau, 'BinEdges', -0.5:1:binEnd, ...
+        'FaceColor', colTau, 'Normalization', 'probability');
+    xlabel('Physical Age (\tau_{phys}) before maintenance'); ylabel('Probability');
+    title('Policy Structure (Last 80 Years)');
+    subtitle('Note: \tau_{phys} is uncapped in physics engine');
+end
+
+% 8) Annual Budget Utilization
+figure(8);
+hMean = plot_with_ci(years, baseRes.all_spentU_byYear, colBudget);
+hold on;
+hTarget = plot([0 defaultParams.nYears], [0.90 0.90], 'k--', 'LineWidth', 2.0);
+xlabel('Year'); ylabel('Fraction Spent');
+title('Annual Budget Utilization');
+ylim([0 1.1]); xlim([0 defaultParams.nYears]); xticks(yearTicks);
+lgd8 = legend([hMean, hTarget], {'Mean \pm 95% CI', 'Target (0.90)'}, 'Location', 'best');
+set(lgd8, 'Box', 'on', 'Color', 'w'); 
+
+% 9) Annual Maintenance Count
+figure(9);
+expectedCount = 0.90 / defaultParams.costHM; 
+hMeanCount = plot_with_ci(years, baseRes.all_maintYearCount, colMaint, '-', 0.45);
+hold on;
+hExpected = plot([years(1) years(end)], [expectedCount expectedCount], ...
+     'k--', 'LineWidth', 2.0); 
+xlabel('Year'); ylabel('Count');
+title('Annual Maintenance Count');
+grid on;
+xlim([0 defaultParams.nYears]); xticks(yearTicks);
+lgd9 = legend([hMeanCount, hExpected], ...
+       {'Mean \pm 95% CI', 'Expected (90% spend)'}, ...
+       'Location', 'best');
+set(lgd9, 'Box', 'on', 'Color', 'w'); 
+
+% 10) Lowest Health
+figure(10);
+plot_with_ci(years, baseRes.all_minHealth, colHealth);
+xlabel('Year'); ylabel('Min Health');
+title('Lowest Health per Year');
+grid on; xlim([0 defaultParams.nYears]); xticks(yearTicks); ylim([0 1]);
+
+%% ======================= SENSITIVITY ANALYSIS ==========================
+fprintf('\n--- Running Sensitivity Analysis (Extended Horizon) ---\n');
+sensParams = defaultParams;
+sensParams.nIterations = 20; 
+sensParams.nYears = 1000; 
+
+% Sensitivity 1: w_b vs. Spending
+wb_values = [0.0, 0.05, 0.10, 0.20, 0.40];
+mean_spend_res = zeros(length(wb_values), 1);
+std_spend_res  = zeros(length(wb_values), 1);
+fprintf('1. Testing w_b values: ');
+for i = 1:length(wb_values)
+    fprintf('%.2f ', wb_values(i));
+    p = sensParams;
+    p.w_b = wb_values(i);
+    p.w_h = 1.0 - p.w_b;
+    res = run_simulation_rlearning(p);
+    last20 = floor(p.nYears * 0.8):p.nYears;
+    data = res.all_spentU_byYear(last20, :);
+    mean_spend_res(i) = mean(data(:));
+    std_spend_res(i)  = std(mean(data,1));
+end
+fprintf('\n');
+
+figure(11);
+errorbar(wb_values, mean_spend_res, std_spend_res, '-o', ...
+    'Color', colBudget, 'LineWidth', 2.0, 'MarkerFaceColor', colBudget, 'MarkerSize', 8);
+yline(0.90, 'k--', 'Target', 'LineWidth', 1.5);
+xlabel('Budget Reward Weight (w_b)');
+ylabel('Mean Annual Spend');
+title('Sensitivity: w_b vs. Spending');
+grid on;
+
+% Sensitivity 2: Cost vs. Health
+cost_values = [0.03, 0.04, 0.05, 0.06, 0.08];
+mean_health_res = zeros(length(cost_values), 1);
+std_health_res  = zeros(length(cost_values), 1);
+fprintf('2. Testing costHM values: ');
+for i = 1:length(cost_values)
+    fprintf('%.2f ', cost_values(i));
+    p = sensParams;
+    p.costHM = cost_values(i);
+    res = run_simulation_rlearning(p);
+    T_idx_start = floor(res.T * 0.8);
+    data = res.all_hLog(T_idx_start:end, :);
+    mean_health_res(i) = mean(data(:));
+    std_health_res(i)  = std(mean(data,1));
+end
+fprintf('\nDone.\n');
+
+figure(12);
+errorbar(cost_values, mean_health_res, std_health_res, '-s', ...
+    'Color', colHealth, 'LineWidth', 2.0, 'MarkerFaceColor', colHealth, 'MarkerSize', 8);
+xlabel('Maintenance Cost (fraction of budget)');
+ylabel('Mean Health');
+title('Sensitivity: Cost vs. Health');
+grid on;
+
+%% ======================= POLICY HEAT MAP ===============================
+% Added Feature: Visualize the learned policy for R-Learning
+% We take the Q-table from the last iteration of the R-Learning run.
+figure(13);
+Q_final = baseRes.finalQ; % Recovered from simulation
+Sbins = size(Q_final, 3);
+idxS_neutral = ceil(Sbins/2); % Approx slack = 0 (neutral budget)
+Q_slice = squeeze(Q_final(:, :, idxS_neutral, :)); % (Hbins x TauBins x 2)
+
+% Calculate greedy policy map: max over action dim (dim 3 after squeeze)
+[~, policyMap] = max(Q_slice, [], 3); 
+% policyMap is (Hbins x TauBins), values 1 (Wait) or 2 (Maint)
+% Convert to 0 (Wait) and 1 (Maint) for plotting
+policyBinary = policyMap - 1;
+
+% Plot
+imagesc(0:defaultParams.tauMax, linspace(0, 1, size(Q_final,1)), policyBinary);
+set(gca, 'YDir', 'normal'); % Health increases upwards
+colormap([0.9 0.9 0.9; 0.301 0.745 0.933]); % Grey (Wait) to Cyan (Maint)
+c = colorbar;
+c.Ticks = [0.25, 0.75];
+c.TickLabels = {'Wait', 'Maintain'};
+xlabel('State Age (\tau_{state})');
+ylabel('Health (h)');
+title('R-Learning Policy Map (Neutral Slack)');
+grid on;
+
+
+%% ======================= HELPER FUNCTIONS ==============================
+function hLine = plot_with_ci(x, data, color, line_style, face_alpha)
+    if nargin < 4, line_style = '-'; end
+    if nargin < 5, face_alpha = 0.2; end 
+    
+    x = x(:);
+    mean_y = mean(data, 2);
+    n = size(data, 2);
+    
+    % Downsample
+    if length(x) > 10000
+        ds = 10;
+        x = x(1:ds:end);
+        mean_y = mean_y(1:ds:end);
+        data = data(1:ds:end, :);
+    end
+    
+    if n > 1
+        std_y = std(data, 0, 2);
+        sem_y = std_y / sqrt(n);
+        t_crit = tinv(0.975, n-1); 
+        
+        fill_x = [x; flipud(x)];
+        fill_y = [mean_y - t_crit*sem_y; flipud(mean_y + t_crit*sem_y)];
+        
+        fill(fill_x, fill_y, color, 'FaceAlpha', face_alpha, ...
+            'EdgeColor', 'none', 'HandleVisibility', 'off');
+        hold on;
+    end
+    hLine = plot(x, mean_y, 'Color', color, 'LineWidth', 2.0, 'LineStyle', line_style);
+end
+
+%% ======================= SIMULATION ENGINE (R-LEARNING) =================
+function res = run_simulation_rlearning(P)
+    % Unpack
+    nIterations = P.nIterations;
+    lambda1 = P.lambda1; betaWear = P.betaWear;
+    gainHM = P.gainHM; costHM = P.costHM;
+    w_h = P.w_h; w_b = P.w_b;
+    alpha = P.alpha; betaRho = P.betaRho;
+    epsMin = P.epsMin; epsDecay = P.epsDecay;
+    tauMax = P.tauMax; sMax = P.sMax;
+    nYears = P.nYears;
+    
+    weeksPerYear = 52;
+    T = nYears * weeksPerYear;
+    uStar = 0.90 / weeksPerYear;
+    
+    % Discrete Bins
+    Hbins = 21; TauBins = tauMax + 1; Sbins = 41;
+    toHbin   = @(h) max(1, min(Hbins, 1 + floor(h * (Hbins-1) + 1e-12)));
+    toTaubin = @(t) max(1, min(TauBins, t + 1));
+    toSbin   = @(s) max(1, min(Sbins, 1 + floor(((s + sMax)/(2*sMax)) * (Sbins-1) + 1e-12)));
+    bound01 = @(x) min(1.0, max(0.0, x));
+    clip    = @(x, lo, hi) min(hi, max(lo, x));
+    
+    % Alloc
+    res.all_rewLog         = zeros(T, nIterations);
+    res.all_hLog           = zeros(T, nIterations);
+    res.all_bLog           = zeros(T, nIterations);
+    res.all_tauLog         = zeros(T, nIterations);
+    res.all_rhoLog         = zeros(T, nIterations);
+    res.all_sLog           = zeros(T, nIterations);
+    res.all_rollingMaint52 = zeros(T, nIterations);
+    res.all_spentU_byYear  = zeros(nYears, nIterations);
+    res.all_maintYearCount = zeros(nYears, nIterations);
+    res.all_minHealth      = zeros(nYears, nIterations);
+    res.all_tauAtMaint     = cell(nIterations, 1);
+    
+    for iter = 1:nIterations
+        Q = zeros(Hbins, TauBins, Sbins, 2); 
+        rho = 0.0; 
+        h = 1.0; b = 1.0; s = 0.0;
+        tauState = 0; tauPhys  = 0;
+        
+        rollBuf = zeros(weeksPerYear, 1); bufPtr = 1; rollCount = 0;
+        yearMaintCtr = 0;
+        eps = 1.0;
+        
+        % Buffers
+        hL = zeros(T,1); bL = zeros(T,1); tauL = zeros(T,1); 
+        rewL = zeros(T,1); rhoL = zeros(T,1); sL = zeros(T,1);
+        rollL = zeros(T,1); tauBeforeL = zeros(T,1); maintPerfL = zeros(T,1);
+        
+        for t = 1:T
+            ih = toHbin(h); itau = toTaubin(tauState); is = toSbin(s);
+            
+            % Valid Actions
+            validActions = [1];
+            if b >= costHM, validActions = [validActions, 2]; end
+            
+            % E-Greedy
+            qv = squeeze(Q(ih, itau, is, :));
+            [~, idxG] = max(qv(validActions));
+            aGreedy = validActions(idxG);
+            
+            if rand < eps
+                a = validActions(randi(length(validActions)));
+            else
+                a = aGreedy;
+            end
+            
+            % Physics
+            u_t = 0.0;
+            if a == 2, u_t = costHM; end
+            
+            tauPhys_before = tauPhys;
+            if u_t == 0
+                hNext = bound01(h - lambda1 * (tauPhys^betaWear));
+                bNext = b;
+                tauPhysNext = tauPhys + 1;
+            else
+                hNext = bound01(h - lambda1 * (tauPhys^betaWear) + gainHM);
+                bNext = b - u_t;
+                tauPhysNext = 0;
+            end
+            tauStateNext = min(tauPhysNext, tauMax);
+            
+            % Tracking
+            maintThisWeek = double(u_t > 0);
+            oldVal = rollBuf(bufPtr);
+            rollBuf(bufPtr) = maintThisWeek;
+            rollCount = rollCount - oldVal + maintThisWeek;
+            bufPtr = mod(bufPtr, weeksPerYear) + 1;
+            yearMaintCtr = yearMaintCtr + maintThisWeek;
+            
+            % Year End
+            if mod(t, weeksPerYear) == 0
+                yrIdx = t / weeksPerYear;
+                res.all_maintYearCount(yrIdx, iter) = yearMaintCtr;
+                res.all_spentU_byYear(yrIdx, iter) = 1.0 - bNext; 
+                yearMaintCtr = 0;
+                bNext = 1.0; 
+            end
+            
+            % Slack & Reward
+            sNext = clip(s - (u_t - uStar), -sMax, sMax);
+            bScoreNext = 1 - abs(sNext)/sMax;
+            r = w_h * hNext + w_b * bScoreNext;
+            
+            % R-Learning Update
+            ihp = toHbin(hNext); itaup = toTaubin(tauStateNext); isp = toSbin(sNext);
+            qvp = squeeze(Q(ihp, itaup, isp, :));
+            
+            validNext = [1];
+            if bNext >= costHM, validNext = [validNext, 2]; end
+            Vsp = max(qvp(validNext));
+            Vs  = max(qv(validActions));
+            
+            Qa = Q(ih, itau, is, a);
+            delta = r - rho + Vsp - Qa;
+            Q(ih, itau, is, a) = Qa + alpha * delta;
+            
+            if a == aGreedy
+                rho = rho + betaRho * (r - rho + Vsp - Vs);
+            end
+            
+            % Record
+            rewL(t) = r; hL(t) = h; bL(t) = b; tauL(t) = tauPhys;
+            rhoL(t) = rho; sL(t) = s; rollL(t) = rollCount;
+            tauBeforeL(t) = tauPhys_before; maintPerfL(t) = maintThisWeek;
+            
+            h = hNext; b = bNext; tauState = tauStateNext; tauPhys = tauPhysNext; s = sNext;
+            eps = max(epsMin, eps * epsDecay);
+        end
+        
+        res.all_rewLog(:, iter) = rewL;
+        res.all_hLog(:, iter)   = hL;
+        res.all_bLog(:, iter)   = bL;
+        res.all_tauLog(:, iter) = tauL;
+        res.all_rhoLog(:, iter) = rhoL;
+        res.all_sLog(:, iter)   = sL;
+        res.all_rollingMaint52(:, iter) = rollL;
+        
+        cutoffIdx = max(0, (nYears - 80) * weeksPerYear);
+        maintIndices = find(maintPerfL == 1); 
+        validMaintIndices = maintIndices(maintIndices > cutoffIdx);
+        res.all_tauAtMaint{iter} = tauBeforeL(validMaintIndices);
+        
+        for y=1:nYears
+            i0 = (y-1)*weeksPerYear+1; 
+            i1 = y*weeksPerYear;
+            res.all_minHealth(y, iter) = min(hL(i0:i1));
+        end
+    end
+    res.finalQ = Q; % Store last Q for heatmap
+    res.T = T;
+    res.xYear = (1:T)' / weeksPerYear;
+end
+
+%% ======================= SIMULATION ENGINE (DQN / DISCOUNTED Q) =========
+function res = run_simulation_dqn(P)
+    % Implements Discounted Q-Learning (Tabular) as a proxy for DQN
+    % in this discrete state space.
+    
+    nIterations = P.nIterations;
+    lambda1 = P.lambda1; betaWear = P.betaWear;
+    gainHM = P.gainHM; costHM = P.costHM;
+    w_h = P.w_h; w_b = P.w_b;
+    alpha = P.alpha; 
+    gamma = P.gamma; % Discount factor
+    epsMin = P.epsMin; epsDecay = P.epsDecay;
+    tauMax = P.tauMax; sMax = P.sMax;
+    nYears = P.nYears;
+    
+    weeksPerYear = 52;
+    T = nYears * weeksPerYear;
+    uStar = 0.90 / weeksPerYear;
+    
+    Hbins = 21; TauBins = tauMax + 1; Sbins = 41;
+    toHbin   = @(h) max(1, min(Hbins, 1 + floor(h * (Hbins-1) + 1e-12)));
+    toTaubin = @(t) max(1, min(TauBins, t + 1));
+    toSbin   = @(s) max(1, min(Sbins, 1 + floor(((s + sMax)/(2*sMax)) * (Sbins-1) + 1e-12)));
+    bound01 = @(x) min(1.0, max(0.0, x));
+    clip    = @(x, lo, hi) min(hi, max(lo, x));
+    
+    res.all_hLog           = zeros(T, nIterations);
+    res.all_spentU_byYear  = zeros(nYears, nIterations);
+    res.all_minHealth      = zeros(nYears, nIterations);
+    
+    for iter = 1:nIterations
+        Q = zeros(Hbins, TauBins, Sbins, 2); 
+        h = 1.0; b = 1.0; s = 0.0;
+        tauState = 0; tauPhys = 0;
+        eps = 1.0;
+        
+        hL = zeros(T,1);
+        yearMaintCtr = 0;
+        
+        for t = 1:T
+            ih = toHbin(h); itau = toTaubin(tauState); is = toSbin(s);
+            
+            validActions = [1];
+            if b >= costHM, validActions = [validActions, 2]; end
+            
+            % E-Greedy
+            qv = squeeze(Q(ih, itau, is, :));
+            [~, idxG] = max(qv(validActions));
+            aGreedy = validActions(idxG);
+            
+            if rand < eps
+                a = validActions(randi(length(validActions)));
+            else
+                a = aGreedy;
+            end
+            
+            % Physics
+            u_t = 0.0;
+            if a == 2, u_t = costHM; end
+            
+            if u_t == 0
+                hNext = bound01(h - lambda1 * (tauPhys^betaWear));
+                bNext = b;
+                tauPhysNext = tauPhys + 1;
+            else
+                hNext = bound01(h - lambda1 * (tauPhys^betaWear) + gainHM);
+                bNext = b - u_t;
+                tauPhysNext = 0;
+            end
+            tauStateNext = min(tauPhysNext, tauMax);
+            
+            % Year End
+            if mod(t, weeksPerYear) == 0
+                yrIdx = t / weeksPerYear;
+                res.all_spentU_byYear(yrIdx, iter) = 1.0 - bNext; 
+                bNext = 1.0; 
+            end
+            
+            % Reward
+            sNext = clip(s - (u_t - uStar), -sMax, sMax);
+            bScoreNext = 1 - abs(sNext)/sMax;
+            r = w_h * hNext + w_b * bScoreNext;
+            
+            % Discounted Q-Learning Update
+            ihp = toHbin(hNext); itaup = toTaubin(tauStateNext); isp = toSbin(sNext);
+            qvp = squeeze(Q(ihp, itaup, isp, :));
+            
+            validNext = [1];
+            if bNext >= costHM, validNext = [validNext, 2]; end
+            Vsp = max(qvp(validNext));
+            
+            Qa = Q(ih, itau, is, a);
+            % Update: Q(s,a) <-- Q(s,a) + alpha * [ r + gamma * max Q(s') - Q(s,a) ]
+            Q(ih, itau, is, a) = Qa + alpha * (r + gamma * Vsp - Qa);
+            
+            hL(t) = h;
+            h = hNext; b = bNext; tauState = tauStateNext; tauPhys = tauPhysNext; s = sNext;
+            eps = max(epsMin, eps * epsDecay);
+        end
+        
+        res.all_hLog(:, iter) = hL;
+        for y=1:nYears
+            i0 = (y-1)*weeksPerYear+1; 
+            i1 = y*weeksPerYear;
+            res.all_minHealth(y, iter) = min(hL(i0:i1));
+        end
+    end
+end
+
+%% ======================= SIMULATION ENGINE (BASELINE) ===================
+function res = run_fixed_simulation(P)
+    % Fixed-Interval policy
+    
+    nIterations = P.nIterations;
+    lambda1 = P.lambda1; betaWear = P.betaWear;
+    gainHM = P.gainHM; costHM = P.costHM;
+    nYears = P.nYears;
+    weeksPerYear = 52;
+    T = nYears * weeksPerYear;
+    
+    bound01 = @(x) min(1.0, max(0.0, x));
+    
+    maintInterval = 2; 
+    budgetStopLimit = 0.90; 
+    
+    res.all_hLog           = zeros(T, nIterations);
+    res.all_spentU_byYear  = zeros(nYears, nIterations);
+    res.all_minHealth      = zeros(nYears, nIterations);
+    
+    for iter = 1:nIterations
+        h = 1.0; b = 1.0; 
+        tauPhys = 0;
+        hL = zeros(T,1);
+        currentYearSpend = 0.0;
+        
+        for t = 1:T
+            currentWeekOfYear = mod(t-1, weeksPerYear) + 1;
+            isScheduled = (mod(currentWeekOfYear, maintInterval) == 0);
+            
+            doMaint = false;
+            if isScheduled
+                 if (b >= costHM) && (currentYearSpend + costHM <= budgetStopLimit + 1e-9)
+                     doMaint = true;
+                 end
+            end
+            
+            u_t = 0.0;
+            if doMaint
+                u_t = costHM;
+                currentYearSpend = currentYearSpend + costHM;
+            end
+            
+            if u_t == 0
+                hNext = bound01(h - lambda1 * (tauPhys^betaWear));
+                bNext = b;
+                tauPhysNext = tauPhys + 1;
+            else
+                hNext = bound01(h - lambda1 * (tauPhys^betaWear) + gainHM);
+                bNext = b - u_t;
+                tauPhysNext = 0;
+            end
+            
+            if mod(t, weeksPerYear) == 0
+                yrIdx = t / weeksPerYear;
+                res.all_spentU_byYear(yrIdx, iter) = 1.0 - bNext;
+                bNext = 1.0; 
+                currentYearSpend = 0.0; 
+            end
+            
+            hL(t) = h;
+            h = hNext; b = bNext; tauPhys = tauPhysNext;
+        end
+        
+        res.all_hLog(:, iter) = hL;
+        for y=1:nYears
+            i0 = (y-1)*weeksPerYear+1; 
+            i1 = y*weeksPerYear;
+            res.all_minHealth(y, iter) = min(hL(i0:i1));
+        end
+    end
+end
